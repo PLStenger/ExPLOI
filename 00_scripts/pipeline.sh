@@ -186,16 +186,18 @@ echo "=========================================================="
 echo "STEP 4: QIIME2 Analysis"
 echo "=========================================================="
 
-# Ignore non-critical plugin errors
-export PYTHONWARNINGS="ignore"
-
 # Activate QIIME2 environment
-# Ensure proper environment name (e.g., qiime2-2021.4 or newer)
 source activate qiime2-2021.4 || conda activate qiime2-2021.4
 
 # Set TMPDIR to handle potential space issues
 export TMPDIR="$BASE_DIR/tmp"
 mkdir -p "$TMPDIR"
+
+# FIX: Disable broken rescript plugin
+export QIIME2_NO_LOAD_PLUGINS="rescript"
+
+# Suppress Python warnings
+export PYTHONWARNINGS="ignore"
 
 # 4.1 Import Data
 echo "Importing data into QIIME2..."
