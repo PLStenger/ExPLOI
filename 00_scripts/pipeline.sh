@@ -57,7 +57,8 @@ EOF
 
 # --- Create Manifest File ---
 echo "Creating Manifest File..."
-echo "sample-id,forward-absolute-filepath,reverse-absolute-filepath" > "$MANIFEST_FILE"
+# IMPORTANT: Use TAB-separated format, not comma-separated
+echo -e "sample-id\tforward-absolute-filepath\treverse-absolute-filepath" > "$MANIFEST_FILE"
 
 # Mapping logic for renaming and manifest creation
 declare -A SAMPLES
@@ -149,8 +150,8 @@ for FILE_R1 in "$RAW_DATA_DIR"/*_R1_001.fastq.gz; do
         "$R2_PAIRED" "$R2_UNPAIRED" \
         ILLUMINACLIP:"$ADAPTER_FILE":2:30:10 LEADING:20 TRAILING:20 SLIDINGWINDOW:4:20 MINLEN:100
 
-    # Add to manifest
-    echo "${SAMPLE_ID},${R1_PAIRED},${R2_PAIRED}" >> "$MANIFEST_FILE"
+    # Add to manifest (use TAB instead of comma)
+    echo -e "${SAMPLE_ID}\t${R1_PAIRED}\t${R2_PAIRED}" >> "$MANIFEST_FILE"
 
 done
 
