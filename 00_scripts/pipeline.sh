@@ -186,15 +186,16 @@ echo "=========================================================="
 echo "STEP 4: QIIME2 Analysis"
 echo "=========================================================="
 
-# Activate QIIME2 environment
-source activate qiime2-2021.4 || conda activate qiime2-2021.4
+eval "$(conda shell.bash hook)"
+conda activate /scratch_vol0/fungi/envs/qiime2-amplicon-2024.10
+#conda activate qiime2-2021.4
 
-# Set TMPDIR to handle potential space issues
-export TMPDIR="$BASE_DIR/tmp"
-mkdir -p "$TMPDIR"
+#export PYTHONPATH="${PYTHONPATH}:/scratch_vol0/fungi/.local/lib/python3.9/site-packages/"
+#echo $PYTHONPATH
 
-# FIX: Disable broken rescript plugin
-export QIIME2_NO_LOAD_PLUGINS="rescript"
+# I'm doing this step in order to deal the no space left in cluster :
+export TMPDIR='/scratch_vol0/fungi'
+echo $TMPDIR
 
 # Suppress Python warnings
 export PYTHONWARNINGS="ignore"
