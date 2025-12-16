@@ -26,3 +26,6 @@ For install QIIME2, please refer to http://qiime.org/install/install.html
     sysctl hw.ncpu
     > hw.ncpu: 4
 
+### Run by :   
+
+    time nohup bash pipeline.sh &> pipeline.out
