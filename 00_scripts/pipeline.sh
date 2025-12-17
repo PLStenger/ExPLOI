@@ -32,10 +32,13 @@ mkdir -p "$QC_DIR" "$CLEANED_DIR" "$POST_CLEAN_QC_DIR" "$QIIME_DIR"
 mkdir -p "$QIIME_DIR/core" "$QIIME_DIR/visual" "$QIIME_DIR/export"
 
 # --- Create Metadata File ---
+
+#17_Jourand	Negative_Control
+
+
 echo "Creating Metadata File..."
 cat <<EOF > "$METADATA_FILE"
 sample-id	group
-17_Jourand	Negative_Control
 BL_PCR_Jourand	Negative_Control
 T1_CO	Sample
 T2_CO	Sample
@@ -60,10 +63,12 @@ echo "Creating Manifest File..."
 # IMPORTANT: Use TAB-separated format, not comma-separated
 echo -e "sample-id\tforward-absolute-filepath\treverse-absolute-filepath" > "$MANIFEST_FILE"
 
+#     ["17_Jourand_S110"]="17_Jourand"
+
+
 # Mapping logic for renaming and manifest creation
 declare -A SAMPLES
 SAMPLES=(
-    ["17_Jourand_S110"]="17_Jourand"
     ["BL_PCR_Jourand_S151"]="BL_PCR_Jourand"
     ["BAR253117_S114"]="T1_CO"
     ["BAR253118_S115"]="T2_CO"
@@ -237,13 +242,21 @@ qiime metadata tabulate \
 # 4.2b Generate phylogenetic tree (required for diversity metrics)
 echo "Building phylogenetic tree..."
 
+# Use single thread to avoid memory issues on cluster
 qiime phylogeny align-to-tree-mafft-fasttree \
   --i-sequences "${QIIME_DIR}/core/rep-seqs.qza" \
+  --p-n-threads 1 \
   --o-alignment "${QIIME_DIR}/core/aligned-rep-seqs.qza" \
   --o-masked-alignment "${QIIME_DIR}/core/masked-aligned-rep-seqs.qza" \
   --o-tree "${QIIME_DIR}/core/unrooted-tree.qza" \
-  --o-rooted-tree "${QIIME_DIR}/core/rooted-tree.qza"
+  --o-rooted-tree "${QIIME_DIR}/core/rooted-tree.qza" \
+  --verbose
 
+# If MAFFT still fails, try with a smaller dataset first (skip tree-based metrics)
+if [ ! -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
+  echo "WARNING: Phylogenetic tree creation failed. Skipping tree-based diversity metrics."
+  echo "You can still analyze data without Faith PD and UniFrac distances."
+fi
 
 # 4.3 Filtering Contaminants (Negative Controls)
 echo "Removing Contaminants based on Negative Controls..."
@@ -305,8 +318,6 @@ biom convert \
   -o "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" \
   --to-tsv
 
-# Calculate sample depths (sum of each column)
-# Get the minimum depth that is > MIN_DEPTH
 MIN_DEPTH=1000
 
 SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
@@ -320,7 +331,6 @@ SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.
     }' | \
   sort -n | head -1)
 
-# Fallback: if no samples pass threshold, use median
 if [ -z "$SAMPLING_DEPTH" ] || [ "$SAMPLING_DEPTH" -lt "$MIN_DEPTH" ]; then
   echo "WARNING: No samples above $MIN_DEPTH reads. Using median depth instead."
   SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
@@ -333,17 +343,23 @@ fi
 
 echo "Selected Sampling Depth: $SAMPLING_DEPTH"
 
-if [ -z "$SAMPLING_DEPTH" ] || [ "$SAMPLING_DEPTH" -eq 0 ]; then
-  echo "ERROR: Could not calculate sampling depth. Check table-final.qza"
-  exit 1
+# Check if phylogenetic tree exists
+if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
+  echo "Using phylogenetic tree for diversity analysis..."
+  qiime diversity core-metrics-phylogenetic \
+    --i-phylogeny "${QIIME_DIR}/core/rooted-tree.qza" \
+    --i-table "${QIIME_DIR}/core/table-final.qza" \
+    --p-sampling-depth "$SAMPLING_DEPTH" \
+    --m-metadata-file "$METADATA_FILE" \
+    --output-dir "${QIIME_DIR}/core-metrics-results"
+else
+  echo "WARNING: No phylogenetic tree found. Using non-phylogenetic metrics only..."
+  qiime diversity core-metrics \
+    --i-table "${QIIME_DIR}/core/table-final.qza" \
+    --p-sampling-depth "$SAMPLING_DEPTH" \
+    --m-metadata-file "$METADATA_FILE" \
+    --output-dir "${QIIME_DIR}/core-metrics-results"
 fi
-
-qiime diversity core-metrics-phylogenetic \
-  --i-phylogeny "${QIIME_DIR}/core/rooted-tree.qza" \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-sampling-depth "$SAMPLING_DEPTH" \
-  --m-metadata-file "$METADATA_FILE" \
-  --output-dir "${QIIME_DIR}/core-metrics-results"
 
 
 # 4.5 Taxonomy Classification (Optional - requires trained classifier)
@@ -435,54 +451,50 @@ qiime diversity core-metrics-phylogenetic \
    --input-path "${CORE_METRICS_DIR}/faith_pd_vector.qza" \
    --output-path "${EXPORT_DIR}/diversity/faith_pd"
  
- # 5.4 Merge ASV abundance + taxonomy into one table ---------------------
+# 5.4 Merge ASV abundance + taxonomy into one table ---------------------
 
- # Join feature table and taxonomy on ASV IDs
- # Creates: ASV, taxonomy, confidence, Sample1, Sample2, ...
- python - << 'EOF'
- import pandas as pd
- import os
+python3 << 'EOF'
+import pandas as pd
+import os
 
- export_dir = "${EXPORT_DIR}"
+export_dir = os.getenv("QIIME_DIR") + "/export"
 
- # Load abundance table
- tab = pd.read_csv(
-     os.path.join(export_dir, "feature_table", "feature-table.tsv"),
-     sep="\t", comment="#", index_col=0
- )
+# Load abundance table
+tab = pd.read_csv(
+    os.path.join(export_dir, "feature_table", "feature-table.tsv"),
+    sep="\t", comment="#", index_col=0
+)
 
- # Load taxonomy
- tax = pd.read_csv(
-     os.path.join(export_dir, "taxonomy", "taxonomy.tsv"),
-     sep="\t", comment="#"
- )
- tax = tax.rename(columns={"Feature ID": "ASV_ID", "Taxon": "taxonomy", "Confidence": "confidence"})
- tax = tax.set_index("ASV_ID")
+# Load taxonomy
+tax = pd.read_csv(
+    os.path.join(export_dir, "taxonomy", "taxonomy.tsv"),
+    sep="\t", index_col=0
+)
 
- # Merge
- merged = tax.join(tab, how="inner")
- merged.to_csv(os.path.join(export_dir, "ASV_abundance_taxonomy.tsv"), sep="\t")
- EOF
+# Merge
+merged = tax.join(tab, how="inner")
+merged.to_csv(os.path.join(export_dir, "ASV_abundance_taxonomy.tsv"), sep="\t")
+print(f"Merged table saved: {os.path.join(export_dir, 'ASV_abundance_taxonomy.tsv')}")
+EOF
 
- # 5.7 Sample depths (total reads per sample after all filters) ----------
- 
+# 5.7 Sample depths (total reads per sample after all filters) ----------
 
- python - << 'EOF'
- import pandas as pd
- import os
+python3 << 'EOF'
+import pandas as pd
+import os
 
- export_dir = "${EXPORT_DIR}"
+export_dir = os.getenv("QIIME_DIR") + "/export"
 
- tab = pd.read_csv(
-     os.path.join(export_dir, "feature_table", "feature-table.tsv"),
-     sep="\t", comment="#", index_col=0
- )
+tab = pd.read_csv(
+    os.path.join(export_dir, "feature_table", "feature-table.tsv"),
+    sep="\t", comment="#", index_col=0
+)
 
- depths = tab.sum(axis=0)
- depths.to_csv(os.path.join(export_dir, "sample_read_depths_final.tsv"), sep="\t", header=["reads"])
- EOF
+depths = tab.sum(axis=0)
+depths.to_csv(os.path.join(export_dir, "sample_read_depths_final.tsv"), sep="\t", header=["reads"])
+print(f"Sample depths saved: {os.path.join(export_dir, 'sample_read_depths_final.tsv')}")
+EOF
 
- echo "All export files are in: ${EXPORT_DIR}"
 
 
 echo "Pipeline Completed Successfully!"
