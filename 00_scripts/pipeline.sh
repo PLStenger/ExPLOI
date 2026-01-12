@@ -206,6 +206,12 @@ echo $TMPDIR
 # Suppress Python warnings
 export PYTHONWARNINGS="ignore"
 
+# Fix TMPDIR for MAFFT
+export TMPDIR='/scratch_vol0/fungi/tmp_ExPLOI'
+mkdir -p "$TMPDIR"
+chmod 700 "$TMPDIR"
+echo "Using TMPDIR: $TMPDIR"
+
 # 4.1 Import Data
 echo "Importing data into QIIME2..."
 qiime tools import \
@@ -396,6 +402,9 @@ fi
    -o "${EXPORT_DIR}/feature_table/feature-table.tsv" \
    --to-tsv
 
+# Rename OTU to ASV for clarity in exported files
+sed -i 's/#OTU ID/#ASV_ID/g' "${EXPORT_DIR}/feature_table/feature-table.tsv" 2>/dev/null || true
+
  # 5.2 Representative sequences (ASV sequences in fasta) -----------------
 
  qiime tools export \
@@ -494,6 +503,262 @@ depths = tab.sum(axis=0)
 depths.to_csv(os.path.join(export_dir, "sample_read_depths_final.tsv"), sep="\t", header=["reads"])
 print(f"Sample depths saved: {os.path.join(export_dir, 'sample_read_depths_final.tsv')}")
 EOF
+
+
+# =======================================================================
+# STEP 6: COMPREHENSIVE DIVERSITY INDICES CALCULATION
+# =======================================================================
+
+echo "=========================================================="
+echo "STEP 6: Calculating All Diversity Indices"
+echo "=========================================================="
+
+DIVERSITY_DIR="${QIIME_DIR}/diversity_indices"
+mkdir -p "${DIVERSITY_DIR}"
+
+# 6.1 Alpha diversity indices (beyond core-metrics) ----------------------
+
+echo "Calculating additional alpha diversity indices..."
+
+# Simpson index
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric simpson \
+  --o-alpha-diversity "${DIVERSITY_DIR}/simpson_vector.qza"
+
+# Inverse Simpson (Simpson's Diversity Index)
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric simpson_e \
+  --o-alpha-diversity "${DIVERSITY_DIR}/simpson_evenness_vector.qza"
+
+# Chao1 richness estimator
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric chao1 \
+  --o-alpha-diversity "${DIVERSITY_DIR}/chao1_vector.qza"
+
+# ACE richness estimator
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric ace \
+  --o-alpha-diversity "${DIVERSITY_DIR}/ace_vector.qza"
+
+# Good's coverage
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric goods_coverage \
+  --o-alpha-diversity "${DIVERSITY_DIR}/goods_coverage_vector.qza"
+
+# Fisher's alpha
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric fisher_alpha \
+  --o-alpha-diversity "${DIVERSITY_DIR}/fisher_alpha_vector.qza"
+
+# Berger-Parker dominance
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric berger_parker_d \
+  --o-alpha-diversity "${DIVERSITY_DIR}/berger_parker_vector.qza"
+
+# Dominance (Gini-Simpson)
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric gini_index \
+  --o-alpha-diversity "${DIVERSITY_DIR}/gini_index_vector.qza"
+
+# Brillouin's diversity index
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric brillouin_d \
+  --o-alpha-diversity "${DIVERSITY_DIR}/brillouin_vector.qza"
+
+# Strong's dominance
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric strong \
+  --o-alpha-diversity "${DIVERSITY_DIR}/strong_vector.qza"
+
+# McIntosh diversity
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric mcintosh_d \
+  --o-alpha-diversity "${DIVERSITY_DIR}/mcintosh_d_vector.qza"
+
+# McIntosh evenness
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric mcintosh_e \
+  --o-alpha-diversity "${DIVERSITY_DIR}/mcintosh_e_vector.qza"
+
+# Margalef richness index
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric margalef \
+  --o-alpha-diversity "${DIVERSITY_DIR}/margalef_vector.qza"
+
+# Menhinick richness index
+qiime diversity alpha \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-metric menhinick \
+  --o-alpha-diversity "${DIVERSITY_DIR}/menhinick_vector.qza"
+
+echo "Alpha diversity indices calculated."
+
+# 6.2 Export all indices to TSV -------------------------------------------
+
+echo "Exporting all diversity indices to TSV format..."
+
+mkdir -p "${EXPORT_DIR}/diversity_all"
+
+# Function to export and rename columns for clarity
+export_diversity_metric() {
+    local metric_name=$1
+    local qza_file=$2
+    local output_name=$3
+    
+    if [ -f "$qza_file" ]; then
+        qiime tools export \
+          --input-path "$qza_file" \
+          --output-path "${EXPORT_DIR}/diversity_all/${output_name}_temp"
+        
+        # Rename column header from generic to specific metric name
+        sed "1s/.*/sample-id\t${output_name}/" \
+          "${EXPORT_DIR}/diversity_all/${output_name}_temp/alpha-diversity.tsv" > \
+          "${EXPORT_DIR}/diversity_all/${output_name}.tsv"
+        
+        rm -rf "${EXPORT_DIR}/diversity_all/${output_name}_temp"
+    else
+        echo "Warning: ${qza_file} not found, skipping ${metric_name}..."
+    fi
+}
+
+# Export core metrics (from rarefaction)
+export_diversity_metric "Observed ASVs" \
+  "${QIIME_DIR}/core-metrics-results/observed_features_vector.qza" \
+  "observed_asvs"
+
+export_diversity_metric "Shannon" \
+  "${QIIME_DIR}/core-metrics-results/shannon_vector.qza" \
+  "shannon"
+
+export_diversity_metric "Pielou Evenness" \
+  "${QIIME_DIR}/core-metrics-results/evenness_vector.qza" \
+  "pielou_evenness"
+
+export_diversity_metric "Faith PD" \
+  "${QIIME_DIR}/core-metrics-results/faith_pd_vector.qza" \
+  "faith_pd"
+
+# Export additional metrics
+export_diversity_metric "Simpson" \
+  "${DIVERSITY_DIR}/simpson_vector.qza" \
+  "simpson"
+
+export_diversity_metric "Simpson Evenness" \
+  "${DIVERSITY_DIR}/simpson_evenness_vector.qza" \
+  "simpson_evenness"
+
+export_diversity_metric "Chao1" \
+  "${DIVERSITY_DIR}/chao1_vector.qza" \
+  "chao1"
+
+export_diversity_metric "ACE" \
+  "${DIVERSITY_DIR}/ace_vector.qza" \
+  "ace"
+
+export_diversity_metric "Goods Coverage" \
+  "${DIVERSITY_DIR}/goods_coverage_vector.qza" \
+  "goods_coverage"
+
+export_diversity_metric "Fisher Alpha" \
+  "${DIVERSITY_DIR}/fisher_alpha_vector.qza" \
+  "fisher_alpha"
+
+export_diversity_metric "Berger Parker" \
+  "${DIVERSITY_DIR}/berger_parker_vector.qza" \
+  "berger_parker"
+
+export_diversity_metric "Gini Index" \
+  "${DIVERSITY_DIR}/gini_index_vector.qza" \
+  "gini_index"
+
+export_diversity_metric "Brillouin" \
+  "${DIVERSITY_DIR}/brillouin_vector.qza" \
+  "brillouin"
+
+export_diversity_metric "Strong" \
+  "${DIVERSITY_DIR}/strong_vector.qza" \
+  "strong"
+
+export_diversity_metric "McIntosh D" \
+  "${DIVERSITY_DIR}/mcintosh_d_vector.qza" \
+  "mcintosh_d"
+
+export_diversity_metric "McIntosh E" \
+  "${DIVERSITY_DIR}/mcintosh_e_vector.qza" \
+  "mcintosh_e"
+
+export_diversity_metric "Margalef" \
+  "${DIVERSITY_DIR}/margalef_vector.qza" \
+  "margalef"
+
+export_diversity_metric "Menhinick" \
+  "${DIVERSITY_DIR}/menhinick_vector.qza" \
+  "menhinick"
+
+# 6.3 Merge all indices into a single comprehensive table -----------------
+
+echo "Merging all diversity indices into a single table..."
+
+python3 << 'EOFPYTHON'
+import pandas as pd
+import os
+from pathlib import Path
+
+diversity_dir = Path(os.getenv("QIIME_DIR")) / "export" / "diversity_all"
+
+# List all TSV files
+tsv_files = sorted(diversity_dir.glob("*.tsv"))
+
+if not tsv_files:
+    print("ERROR: No diversity TSV files found!")
+    exit(1)
+
+# Read first file as base
+df_merged = pd.read_csv(tsv_files[0], sep="\t", index_col=0)
+
+# Merge all other files
+for tsv_file in tsv_files[1:]:
+    try:
+        df_temp = pd.read_csv(tsv_file, sep="\t", index_col=0)
+        df_merged = df_merged.join(df_temp, how="outer")
+    except Exception as e:
+        print(f"Warning: Could not merge {tsv_file.name}: {e}")
+
+# Sort by sample name
+df_merged = df_merged.sort_index()
+
+# Save comprehensive table
+output_file = diversity_dir.parent / "diversity_indices_all.tsv"
+df_merged.to_csv(output_file, sep="\t")
+
+print(f"\n✓ Comprehensive diversity table saved:")
+print(f"  {output_file}")
+print(f"\n✓ Number of samples: {len(df_merged)}")
+print(f"✓ Number of indices: {len(df_merged.columns)}")
+print(f"\nColumns included:")
+for col in df_merged.columns:
+    print(f"  - {col}")
+
+EOFPYTHON
+
+echo ""
+echo "=========================================================="
+echo "All diversity indices calculated and exported!"
+echo "Main output: ${EXPORT_DIR}/diversity_indices_all.tsv"
+echo "=========================================================="
 
 
 
