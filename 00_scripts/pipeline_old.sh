@@ -63,9 +63,6 @@ echo "Creating Manifest File..."
 # IMPORTANT: Use TAB-separated format, not comma-separated
 echo -e "sample-id\tforward-absolute-filepath\treverse-absolute-filepath" > "$MANIFEST_FILE"
 
-#     ["17_Jourand_S110"]="17_Jourand"
-
-
 # Mapping logic for renaming and manifest creation
 declare -A SAMPLES
 SAMPLES=(
@@ -200,17 +197,17 @@ conda activate /scratch_vol0/fungi/envs/qiime2-amplicon-2024.10
 #echo $PYTHONPATH
 
 # I'm doing this step in order to deal the no space left in cluster :
-export TMPDIR='/scratch_vol0/fungi'
-echo $TMPDIR
+#export TMPDIR='/scratch_vol0/fungi'
+#echo $TMPDIR
 
 # Suppress Python warnings
 export PYTHONWARNINGS="ignore"
 
-# Fix TMPDIR for MAFFT
-export TMPDIR='/scratch_vol0/fungi/tmp_ExPLOI'
+# Use project directory for temp files (you have write permissions there)
+export TMPDIR="${BASE_DIR}/tmp"
 mkdir -p "$TMPDIR"
-chmod 700 "$TMPDIR"
 echo "Using TMPDIR: $TMPDIR"
+
 
 # 4.1 Import Data
 echo "Importing data into QIIME2..."
@@ -245,24 +242,146 @@ qiime metadata tabulate \
   --m-input-file "$QIIME_DIR/core/dada2-stats.qza" \
   --o-visualization "$QIIME_DIR/visual/dada2-stats.qzv"
 
-# 4.2b Generate phylogenetic tree (required for diversity metrics)
+# 4.2b Generate phylogenetic tree (with error handling)
 echo "Building phylogenetic tree..."
+echo "Step 1: Multiple sequence alignment with MAFFT..."
 
-# Use single thread to avoid memory issues on cluster
+# Create temp directory in writable location
+MAFFT_TMPDIR="${BASE_DIR}/tmp_mafft"
+mkdir -p "$MAFFT_TMPDIR"
+export TMPDIR="$MAFFT_TMPDIR"
+export TMP="$MAFFT_TMPDIR"
+
+# Try align-to-tree-mafft-fasttree first (faster, standard)
 qiime phylogeny align-to-tree-mafft-fasttree \
-  --i-sequences "${QIIME_DIR}/core/rep-seqs.qza" \
+  --i-sequences "${QIIME_DIR}/core/rep-seqs-clean.qza" \
   --p-n-threads 1 \
   --o-alignment "${QIIME_DIR}/core/aligned-rep-seqs.qza" \
   --o-masked-alignment "${QIIME_DIR}/core/masked-aligned-rep-seqs.qza" \
   --o-tree "${QIIME_DIR}/core/unrooted-tree.qza" \
-  --o-rooted-tree "${QIIME_DIR}/core/rooted-tree.qza" \
-  --verbose
+  --o-rooted-tree "${QIIME_DIR}/core/rooted-tree.qza" 2>&1
 
-# If MAFFT still fails, try with a smaller dataset first (skip tree-based metrics)
-if [ ! -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
-  echo "WARNING: Phylogenetic tree creation failed. Skipping tree-based diversity metrics."
-  echo "You can still analyze data without Faith PD and UniFrac distances."
+TREE_STATUS=$?
+
+# If MAFFT fails, try alternative with parttree (for large datasets)
+if [ $TREE_STATUS -ne 0 ] || [ ! -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
+  echo "WARNING: Standard MAFFT alignment failed. Trying with --p-parttree..."
+  
+  # Clean up failed files
+  rm -f "${QIIME_DIR}/core/aligned-rep-seqs.qza"
+  rm -f "${QIIME_DIR}/core/masked-aligned-rep-seqs.qza"
+  rm -f "${QIIME_DIR}/core/unrooted-tree.qza"
+  rm -f "${QIIME_DIR}/core/rooted-tree.qza"
+  
+  # Retry with parttree (skip some sequences to avoid memory issues)
+  qiime phylogeny align-to-tree-mafft-fasttree \
+    --i-sequences "${QIIME_DIR}/core/rep-seqs-clean.qza" \
+    --p-n-threads 1 \
+    --p-parttree \
+    --o-alignment "${QIIME_DIR}/core/aligned-rep-seqs.qza" \
+    --o-masked-alignment "${QIIME_DIR}/core/masked-aligned-rep-seqs.qza" \
+    --o-tree "${QIIME_DIR}/core/unrooted-tree.qza" \
+    --o-rooted-tree "${QIIME_DIR}/core/rooted-tree.qza" 2>&1
+  
+  TREE_STATUS=$?
 fi
+
+# If still fails, try alternative method: fasttreemp directly
+if [ $TREE_STATUS -ne 0 ] || [ ! -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
+  echo "WARNING: MAFFT alignment failed. Trying CLUSTALW as alternative..."
+  
+  rm -f "${QIIME_DIR}/core/aligned-rep-seqs.qza"
+  rm -f "${QIIME_DIR}/core/masked-aligned-rep-seqs.qza"
+  rm -f "${QIIME_DIR}/core/unrooted-tree.qza"
+  rm -f "${QIIME_DIR}/core/rooted-tree.qza"
+  
+  qiime phylogeny align-to-tree-mafft-fasttree \
+    --i-sequences "${QIIME_DIR}/core/rep-seqs-clean.qza" \
+    --p-n-threads 1 \
+    --p-parttree \
+    --o-alignment "${QIIME_DIR}/core/aligned-rep-seqs.qza" \
+    --o-masked-alignment "${QIIME_DIR}/core/masked-aligned-rep-seqs.qza" \
+    --o-tree "${QIIME_DIR}/core/unrooted-tree.qza" \
+    --o-rooted-tree "${QIIME_DIR}/core/rooted-tree.qza" 2>&1 || true
+fi
+
+# Final check and summary
+if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
+  echo "✓ Phylogenetic tree created successfully!"
+  qiime tools peek "${QIIME_DIR}/core/rooted-tree.qza"
+else
+  echo "✗ Phylogenetic tree creation FAILED"
+  echo "  This is likely due to memory or permissions issues on the cluster"
+  echo "  Continuing without Faith PD (tree-based metrics will be skipped)"
+fi
+
+# Cleanup
+rm -rf "$MAFFT_TMPDIR"
+
+
+# 4.3 Filtering Contaminants (Negative Controls)
+echo "Removing Contaminants based on Negative Controls..."
+
+# Step 1: Extract ASV IDs present in negative controls
+qiime feature-table filter-samples \
+  --i-table "${QIIME_DIR}/core/table.qza" \
+  --m-metadata-file "$METADATA_FILE" \
+  --p-where "[group]='Negative_Control'" \
+  --o-filtered-table "${QIIME_DIR}/core/neg-controls-table.qza"
+
+# Step 1b: CHECK if negative control has any sequences
+qiime feature-table summarize \
+  --i-table "${QIIME_DIR}/core/neg-controls-table.qza" \
+  --o-visualization "${QIIME_DIR}/visual/neg-controls-summary.qzv"
+
+# Step 2: Get list of ASV IDs from negative controls
+qiime tools export \
+  --input-path "${QIIME_DIR}/core/neg-controls-table.qza" \
+  --output-path "${QIIME_DIR}/export/neg-controls"
+
+biom convert \
+  -i "${QIIME_DIR}/export/neg-controls/feature-table.biom" \
+  -o "${QIIME_DIR}/export/neg-controls/feature-table.tsv" \
+  --to-tsv
+
+# Extract ASV IDs (skip header and first comment line)
+tail -n +3 "${QIIME_DIR}/export/neg-controls/feature-table.tsv" | \
+  cut -f1 > "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
+
+# Step 2b: CHECK if we actually found contaminant ASVs
+NUM_CONTAMINANTS=$(wc -l < "${QIIME_DIR}/export/neg-controls/contamination_ids.txt")
+echo "Found ${NUM_CONTAMINANTS} contaminant ASVs in negative controls"
+
+if [ "$NUM_CONTAMINANTS" -eq 0 ]; then
+  echo "WARNING: No contaminants found in negative control!"
+  echo "Skipping decontamination step."
+  
+  # Just copy the original table
+  cp "${QIIME_DIR}/core/table.qza" "${QIIME_DIR}/core/table-decontam.qza"
+  cp "${QIIME_DIR}/core/rep-seqs.qza" "${QIIME_DIR}/core/rep-seqs-clean.qza"
+else
+  # Step 3: Remove contaminating ASVs from main table
+  qiime feature-table filter-features \
+    --i-table "${QIIME_DIR}/core/table.qza" \
+    --m-metadata-file "${QIIME_DIR}/export/neg-controls/contamination_ids.txt" \
+    --p-exclude-ids \
+    --o-filtered-table "${QIIME_DIR}/core/table-decontam.qza"
+
+  # Step 4: Filter representative sequences to match
+  qiime feature-table filter-seqs \
+    --i-data "${QIIME_DIR}/core/rep-seqs.qza" \
+    --i-table "${QIIME_DIR}/core/table-decontam.qza" \
+    --o-filtered-data "${QIIME_DIR}/core/rep-seqs-clean.qza"
+fi
+
+# Step 5: Remove Negative Control samples from the table
+qiime feature-table filter-samples \
+  --i-table "${QIIME_DIR}/core/table-decontam.qza" \
+  --m-metadata-file "$METADATA_FILE" \
+  --p-where "[group]='Sample'" \
+  --o-filtered-table "${QIIME_DIR}/core/table-final.qza"
+
+echo "Decontamination complete. Final table: table-final.qza"
 
 # 4.3 Filtering Contaminants (Negative Controls)
 echo "Removing Contaminants based on Negative Controls..."
@@ -310,9 +429,23 @@ qiime feature-table filter-samples \
 
 echo "Decontamination complete. Final table: table-final.qza"
 
+# Remove old core-metrics results if they exist
+if [ -d "${QIIME_DIR}/core-metrics-results" ]; then
+  echo "Removing old core-metrics-results directory..."
+  rm -rf "${QIIME_DIR}/core-metrics-results"
+fi
 
 # 4.4 Rarefaction (Smart Auto-Depth)
 echo "Running Rarefaction..."
+
+# 4.4 Rarefaction & Diversity Metrics with Rarefaction Curves
+echo "Running Rarefaction Analysis..."
+
+# Remove old core-metrics results if they exist
+if [ -d "${QIIME_DIR}/core-metrics-results" ]; then
+  echo "Removing old core-metrics-results directory..."
+  rm -rf "${QIIME_DIR}/core-metrics-results"
+fi
 
 # Export table to calculate depths
 qiime tools export \
@@ -326,13 +459,24 @@ biom convert \
 
 MIN_DEPTH=1000
 
+# Calculate sampling depth (10th percentile to be conservative)
 SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
   awk -F'\t' '
     NR==1 {for(i=2; i<=NF; i++) header[i]=$i}
     {for(i=2; i<=NF; i++) sum[header[i]]+=$i}
     END {
+      count = 0
       for(sample in sum) {
-        if(sum[sample] > '$MIN_DEPTH') print sum[sample]
+        if(sum[sample] > '$MIN_DEPTH') {
+          depths[count++] = sum[sample]
+        }
+      }
+      if(count > 0) {
+        asort(depths)
+        # Return 10th percentile to avoid losing samples
+        idx = int(count * 0.1)
+        if(idx < 1) idx = 1
+        print depths[idx]
       }
     }' | \
   sort -n | head -1)
@@ -349,23 +493,107 @@ fi
 
 echo "Selected Sampling Depth: $SAMPLING_DEPTH"
 
+# Create output directory
+mkdir -p "${QIIME_DIR}/core-metrics-results"
+
 # Check if phylogenetic tree exists
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
-  echo "Using phylogenetic tree for diversity analysis..."
+  echo "Using phylogenetic tree for diversity analysis (includes Faith PD)..."
+  
   qiime diversity core-metrics-phylogenetic \
     --i-phylogeny "${QIIME_DIR}/core/rooted-tree.qza" \
     --i-table "${QIIME_DIR}/core/table-final.qza" \
     --p-sampling-depth "$SAMPLING_DEPTH" \
     --m-metadata-file "$METADATA_FILE" \
-    --output-dir "${QIIME_DIR}/core-metrics-results"
+    --output-dir "${QIIME_DIR}/core-metrics-results" \
+    --verbose
+    
+  METRICS_STATUS=$?
+  
+  if [ $METRICS_STATUS -ne 0 ]; then
+    echo "WARNING: Phylogenetic metrics failed. Falling back to non-phylogenetic metrics..."
+    rm -rf "${QIIME_DIR}/core-metrics-results"
+    mkdir -p "${QIIME_DIR}/core-metrics-results"
+    
+    qiime diversity core-metrics \
+      --i-table "${QIIME_DIR}/core/table-final.qza" \
+      --p-sampling-depth "$SAMPLING_DEPTH" \
+      --m-metadata-file "$METADATA_FILE" \
+      --output-dir "${QIIME_DIR}/core-metrics-results"
+  fi
 else
   echo "WARNING: No phylogenetic tree found. Using non-phylogenetic metrics only..."
+  
   qiime diversity core-metrics \
     --i-table "${QIIME_DIR}/core/table-final.qza" \
     --p-sampling-depth "$SAMPLING_DEPTH" \
     --m-metadata-file "$METADATA_FILE" \
     --output-dir "${QIIME_DIR}/core-metrics-results"
 fi
+
+echo "✓ Diversity metrics calculated!"
+
+# 4.4b Rarefaction Curves
+echo ""
+echo "Generating rarefaction curves..."
+
+# Calculate max depth (for rarefaction curve x-axis)
+MAX_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
+  awk -F'\t' '
+    NR==1 {for(i=2; i<=NF; i++) header[i]=$i}
+    {for(i=2; i<=NF; i++) sum[header[i]]+=$i}
+    END {
+      max = 0
+      for(sample in sum) {
+        if(sum[sample] > max) max = sum[sample]
+      }
+      print max
+    }')
+
+# Set rarefaction step (1/10th of max depth, minimum 500)
+RARE_STEP=$((MAX_DEPTH / 10))
+if [ "$RARE_STEP" -lt 500 ]; then
+  RARE_STEP=500
+fi
+
+echo "Max depth: ${MAX_DEPTH}, Rarefaction step: ${RARE_STEP}"
+
+# Rarefaction curves for observed ASVs
+qiime diversity alpha-rarefaction \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --p-min-depth 1 \
+  --p-max-depth "$MAX_DEPTH" \
+  --p-steps 20 \
+  --m-metadata-file "$METADATA_FILE" \
+  --o-visualization "${QIIME_DIR}/visual/rarefaction-curves.qzv"
+
+echo "✓ Rarefaction curves generated: rarefaction-curves.qzv"
+
+# Additional: Rarefaction curves with Faith PD (if tree exists)
+if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
+  echo "Generating Faith PD rarefaction curves..."
+  
+  qiime diversity alpha-rarefaction \
+    --i-table "${QIIME_DIR}/core/table-final.qza" \
+    --i-phylogeny "${QIIME_DIR}/core/rooted-tree.qza" \
+    --p-min-depth 1 \
+    --p-max-depth "$MAX_DEPTH" \
+    --p-steps 20 \
+    --m-metadata-file "$METADATA_FILE" \
+    --o-visualization "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv"
+  
+  echo "✓ Faith PD rarefaction curves generated: rarefaction-curves-phylogenetic.qzv"
+fi
+
+echo ""
+echo "========== RAREFACTION SUMMARY =========="
+echo "Sampling depth used: $SAMPLING_DEPTH reads"
+echo "Max depth in dataset: $MAX_DEPTH reads"
+echo "Visualizations:"
+echo "  - rarefaction-curves.qzv (Observed ASVs + Shannon)"
+echo "  - rarefaction-curves-phylogenetic.qzv (Faith PD)"
+echo "=========================================="
+
 
 
 # 4.5 Taxonomy Classification (Optional - requires trained classifier)
@@ -462,47 +690,71 @@ sed -i 's/#OTU ID/#ASV_ID/g' "${EXPORT_DIR}/feature_table/feature-table.tsv" 2>/
  
 # 5.4 Merge ASV abundance + taxonomy into one table ---------------------
 
-python3 << 'EOF'
+python3 << 'EOFPYTHON'
 import pandas as pd
 import os
+import sys
 
-export_dir = os.getenv("QIIME_DIR") + "/export"
+# Get QIIME_DIR from environment variable
+qiime_dir = os.getenv("QIIME_DIR")
+if not qiime_dir:
+    print("ERROR: QIIME_DIR environment variable not set!")
+    sys.exit(1)
 
-# Load abundance table
-tab = pd.read_csv(
-    os.path.join(export_dir, "feature_table", "feature-table.tsv"),
-    sep="\t", comment="#", index_col=0
-)
+export_dir = os.path.join(qiime_dir, "export")
 
-# Load taxonomy
-tax = pd.read_csv(
-    os.path.join(export_dir, "taxonomy", "taxonomy.tsv"),
-    sep="\t", index_col=0
-)
+try:
+    # Load abundance table
+    tab = pd.read_csv(
+        os.path.join(export_dir, "feature_table", "feature-table.tsv"),
+        sep="\t", comment="#", index_col=0
+    )
 
-# Merge
-merged = tax.join(tab, how="inner")
-merged.to_csv(os.path.join(export_dir, "ASV_abundance_taxonomy.tsv"), sep="\t")
-print(f"Merged table saved: {os.path.join(export_dir, 'ASV_abundance_taxonomy.tsv')}")
-EOF
+    # Load taxonomy
+    tax = pd.read_csv(
+        os.path.join(export_dir, "taxonomy", "taxonomy.tsv"),
+        sep="\t", index_col=0
+    )
+
+    # Merge
+    merged = tax.join(tab, how="inner")
+    output_file = os.path.join(export_dir, "ASV_abundance_taxonomy.tsv")
+    merged.to_csv(output_file, sep="\t")
+    print(f"Merged table saved: {output_file}")
+except Exception as e:
+    print(f"ERROR in merging tables: {e}")
+    sys.exit(1)
+EOFPYTHON
 
 # 5.7 Sample depths (total reads per sample after all filters) ----------
 
-python3 << 'EOF'
+python3 << 'EOFPYTHON'
 import pandas as pd
 import os
+import sys
 
-export_dir = os.getenv("QIIME_DIR") + "/export"
+qiime_dir = os.getenv("QIIME_DIR")
+if not qiime_dir:
+    print("ERROR: QIIME_DIR environment variable not set!")
+    sys.exit(1)
 
-tab = pd.read_csv(
-    os.path.join(export_dir, "feature_table", "feature-table.tsv"),
-    sep="\t", comment="#", index_col=0
-)
+export_dir = os.path.join(qiime_dir, "export")
 
-depths = tab.sum(axis=0)
-depths.to_csv(os.path.join(export_dir, "sample_read_depths_final.tsv"), sep="\t", header=["reads"])
-print(f"Sample depths saved: {os.path.join(export_dir, 'sample_read_depths_final.tsv')}")
-EOF
+try:
+    tab = pd.read_csv(
+        os.path.join(export_dir, "feature_table", "feature-table.tsv"),
+        sep="\t", comment="#", index_col=0
+    )
+
+    depths = tab.sum(axis=0)
+    output_file = os.path.join(export_dir, "sample_read_depths_final.tsv")
+    depths.to_csv(output_file, sep="\t", header=["reads"])
+    print(f"Sample depths saved: {output_file}")
+except Exception as e:
+    print(f"ERROR in calculating depths: {e}")
+    sys.exit(1)
+EOFPYTHON
+
 
 
 # =======================================================================
@@ -715,44 +967,58 @@ echo "Merging all diversity indices into a single table..."
 python3 << 'EOFPYTHON'
 import pandas as pd
 import os
+import sys
 from pathlib import Path
 
-diversity_dir = Path(os.getenv("QIIME_DIR")) / "export" / "diversity_all"
+qiime_dir = os.getenv("QIIME_DIR")
+if not qiime_dir:
+    print("ERROR: QIIME_DIR environment variable not set!")
+    sys.exit(1)
+
+diversity_dir = Path(qiime_dir) / "export" / "diversity_all"
 
 # List all TSV files
 tsv_files = sorted(diversity_dir.glob("*.tsv"))
 
 if not tsv_files:
     print("ERROR: No diversity TSV files found!")
-    exit(1)
+    sys.exit(1)
 
-# Read first file as base
-df_merged = pd.read_csv(tsv_files[0], sep="\t", index_col=0)
+print(f"Found {len(tsv_files)} diversity files to merge")
 
-# Merge all other files
-for tsv_file in tsv_files[1:]:
-    try:
-        df_temp = pd.read_csv(tsv_file, sep="\t", index_col=0)
-        df_merged = df_merged.join(df_temp, how="outer")
-    except Exception as e:
-        print(f"Warning: Could not merge {tsv_file.name}: {e}")
+try:
+    # Read first file as base
+    df_merged = pd.read_csv(tsv_files[0], sep="\t", index_col=0)
 
-# Sort by sample name
-df_merged = df_merged.sort_index()
+    # Merge all other files
+    for tsv_file in tsv_files[1:]:
+        try:
+            df_temp = pd.read_csv(tsv_file, sep="\t", index_col=0)
+            df_merged = df_merged.join(df_temp, how="outer")
+        except Exception as e:
+            print(f"Warning: Could not merge {tsv_file.name}: {e}")
 
-# Save comprehensive table
-output_file = diversity_dir.parent / "diversity_indices_all.tsv"
-df_merged.to_csv(output_file, sep="\t")
+    # Sort by sample name
+    df_merged = df_merged.sort_index()
 
-print(f"\n✓ Comprehensive diversity table saved:")
-print(f"  {output_file}")
-print(f"\n✓ Number of samples: {len(df_merged)}")
-print(f"✓ Number of indices: {len(df_merged.columns)}")
-print(f"\nColumns included:")
-for col in df_merged.columns:
-    print(f"  - {col}")
+    # Save comprehensive table
+    output_file = diversity_dir.parent / "diversity_indices_all.tsv"
+    df_merged.to_csv(output_file, sep="\t")
+
+    print(f"\n✓ Comprehensive diversity table saved:")
+    print(f"  {output_file}")
+    print(f"\n✓ Number of samples: {len(df_merged)}")
+    print(f"✓ Number of indices: {len(df_merged.columns)}")
+    print(f"\nColumns included:")
+    for col in df_merged.columns:
+        print(f"  - {col}")
+
+except Exception as e:
+    print(f"ERROR in merging diversity tables: {e}")
+    sys.exit(1)
 
 EOFPYTHON
+
 
 echo ""
 echo "=========================================================="
