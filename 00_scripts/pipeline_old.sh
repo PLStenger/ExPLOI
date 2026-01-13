@@ -596,9 +596,9 @@ echo "=========================================="
 
 
 
-# 4.5 Taxonomy Classification (Optional - requires trained classifier)
+# 4.5 Taxonomy Classification 
  echo "Assigning Taxonomy..."
- CLASSIFIER_PATH="/scratch_vol0/fungi/dugong_microbiome/05_QIIME2/silva-138.2-ssu-nr99-341f-805r-classifier.qza"
+ CLASSIFIER_PATH="/nvme/bio/data_fungi/BioIndic_La_Reunion_Island_seawater_four_month_SED/05_QIIME2/Original_reads_16S/taxonomy/16S/Classifier.qza"
  qiime feature-classifier classify-sklearn \
    --i-classifier "$CLASSIFIER_PATH" \
    --i-reads "$QIIME_DIR/core/rep-seqs-clean.qza" \
