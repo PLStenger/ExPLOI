@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # ========================================================================================================
-# ExPLOI Project - 16S Metabarcoding Pipeline
+# ExPLOI Project - 16S Metabarcoding Pipeline (CORRECTED VERSION)
 # ========================================================================================================
 #
 # This script performs the complete metabarcoding analysis pipeline:
 # 1. Quality Check (FastQC/MultiQC)
 # 2. Adapter Trimming & Filtering (Trimmomatic)
-# 3. QIIME2 Pipeline (Import, Denoise, Taxonomy, Rarefaction)
+# 3. QIIME2 Pipeline (Import, Denoise, Taxonomy, Rarefaction, Diversity)
 #
 # CLUSTER CONFIGURATION:
 # - Ensure Conda environments 'fastqc', 'multiqc', 'trimmomatic', and 'qiime2-amplicon-2024.10' are available.
@@ -306,7 +306,7 @@ mkdir -p "$MAFFT_TMPDIR"
 export TMPDIR="$MAFFT_TMPDIR"
 export TMP="$MAFFT_TMPDIR"
 
-# Try align-to-tree-mafft-fasttree first (faster, standard)
+# Try align-to-tree-mafft-fasttree
 qiime phylogeny align-to-tree-mafft-fasttree \
   --i-sequences "${QIIME_DIR}/core/rep-seqs-clean.qza" \
   --p-n-threads 1 \
@@ -317,17 +317,15 @@ qiime phylogeny align-to-tree-mafft-fasttree \
 
 TREE_STATUS=$?
 
-# If MAFFT fails, try alternative with parttree (for large datasets)
+# If MAFFT fails, try with parttree
 if [ $TREE_STATUS -ne 0 ] || [ ! -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
   echo "WARNING: Standard MAFFT alignment failed. Trying with --p-parttree..."
   
-  # Clean up failed files
   rm -f "${QIIME_DIR}/core/aligned-rep-seqs.qza"
   rm -f "${QIIME_DIR}/core/masked-aligned-rep-seqs.qza"
   rm -f "${QIIME_DIR}/core/unrooted-tree.qza"
   rm -f "${QIIME_DIR}/core/rooted-tree.qza"
   
-  # Retry with parttree
   qiime phylogeny align-to-tree-mafft-fasttree \
     --i-sequences "${QIIME_DIR}/core/rep-seqs-clean.qza" \
     --p-n-threads 1 \
@@ -340,7 +338,7 @@ if [ $TREE_STATUS -ne 0 ] || [ ! -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
   TREE_STATUS=$?
 fi
 
-# Final check and summary
+# Final check
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
   echo "✓ Phylogenetic tree created successfully!"
   qiime tools peek "${QIIME_DIR}/core/rooted-tree.qza"
@@ -356,10 +354,10 @@ rm -rf "$MAFFT_TMPDIR"
 echo ""
 echo "Running Rarefaction Analysis..."
 
-# Remove old core-metrics results if they exist
-if [ -d "${QIIME_DIR}/core-metrics-results" ]; then
-  rm -rf "${QIIME_DIR}/core-metrics-results"
-fi
+# FORCE remove old core-metrics results
+echo "Cleaning old core-metrics-results..."
+rm -rf "${QIIME_DIR}/core-metrics-results"
+mkdir -p "${QIIME_DIR}/core-metrics-results"
 
 # Export table to calculate depths
 qiime tools export \
@@ -373,7 +371,7 @@ biom convert \
 
 MIN_DEPTH=1000
 
-# Calculate sampling depth (10th percentile to be conservative)
+# Calculate sampling depth (10th percentile)
 SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
   awk -F'\t' '
     NR==1 {for(i=2; i<=NF; i++) header[i]=$i}
@@ -406,10 +404,7 @@ fi
 
 echo "Selected Sampling Depth: $SAMPLING_DEPTH"
 
-# Create output directory
-mkdir -p "${QIIME_DIR}/core-metrics-results"
-
-# Check if phylogenetic tree exists
+# Run core-metrics with phylogenetic tree if available
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
   echo "Using phylogenetic tree for diversity analysis (includes Faith PD)..."
   
@@ -418,21 +413,47 @@ if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
     --i-table "${QIIME_DIR}/core/table-final.qza" \
     --p-sampling-depth "$SAMPLING_DEPTH" \
     --m-metadata-file "$METADATA_FILE" \
-    --output-dir "${QIIME_DIR}/core-metrics-results" \
+    --o-rarefied-table "${QIIME_DIR}/core-metrics-results/rarefied_table.qza" \
+    --o-faith-pd-vector "${QIIME_DIR}/core-metrics-results/faith_pd_vector.qza" \
+    --o-observed-features-vector "${QIIME_DIR}/core-metrics-results/observed_features_vector.qza" \
+    --o-shannon-vector "${QIIME_DIR}/core-metrics-results/shannon_vector.qza" \
+    --o-evenness-vector "${QIIME_DIR}/core-metrics-results/evenness_vector.qza" \
+    --o-unweighted-unifrac-distance-matrix "${QIIME_DIR}/core-metrics-results/unweighted_unifrac_distance_matrix.qza" \
+    --o-weighted-unifrac-distance-matrix "${QIIME_DIR}/core-metrics-results/weighted_unifrac_distance_matrix.qza" \
+    --o-jaccard-distance-matrix "${QIIME_DIR}/core-metrics-results/jaccard_distance_matrix.qza" \
+    --o-bray-curtis-distance-matrix "${QIIME_DIR}/core-metrics-results/bray_curtis_distance_matrix.qza" \
+    --o-unweighted-unifrac-pcoa-results "${QIIME_DIR}/core-metrics-results/unweighted_unifrac_pcoa_results.qza" \
+    --o-weighted-unifrac-pcoa-results "${QIIME_DIR}/core-metrics-results/weighted_unifrac_pcoa_results.qza" \
+    --o-jaccard-pcoa-results "${QIIME_DIR}/core-metrics-results/jaccard_pcoa_results.qza" \
+    --o-bray-curtis-pcoa-results "${QIIME_DIR}/core-metrics-results/bray_curtis_pcoa_results.qza" \
+    --o-unweighted-unifrac-emperor "${QIIME_DIR}/core-metrics-results/unweighted_unifrac_emperor.qzv" \
+    --o-weighted-unifrac-emperor "${QIIME_DIR}/core-metrics-results/weighted_unifrac_emperor.qzv" \
+    --o-jaccard-emperor "${QIIME_DIR}/core-metrics-results/jaccard_emperor.qzv" \
+    --o-bray-curtis-emperor "${QIIME_DIR}/core-metrics-results/bray_curtis_emperor.qzv" \
     --verbose
     
-  METRICS_STATUS=$?
-  
-  if [ $METRICS_STATUS -ne 0 ]; then
-    echo "WARNING: Phylogenetic metrics failed. Falling back to non-phylogenetic metrics..."
-    rm -rf "${QIIME_DIR}/core-metrics-results"
-    mkdir -p "${QIIME_DIR}/core-metrics-results"
+  if [ $? -eq 0 ]; then
+    echo "✓ Diversity metrics calculated with Faith PD!"
+  else
+    echo "WARNING: Phylogenetic metrics failed. Trying non-phylogenetic metrics..."
+    rm -rf "${QIIME_DIR}/core-metrics-results"/*
     
     qiime diversity core-metrics \
       --i-table "${QIIME_DIR}/core/table-final.qza" \
       --p-sampling-depth "$SAMPLING_DEPTH" \
       --m-metadata-file "$METADATA_FILE" \
-      --output-dir "${QIIME_DIR}/core-metrics-results"
+      --o-rarefied-table "${QIIME_DIR}/core-metrics-results/rarefied_table.qza" \
+      --o-observed-features-vector "${QIIME_DIR}/core-metrics-results/observed_features_vector.qza" \
+      --o-shannon-vector "${QIIME_DIR}/core-metrics-results/shannon_vector.qza" \
+      --o-evenness-vector "${QIIME_DIR}/core-metrics-results/evenness_vector.qza" \
+      --o-jaccard-distance-matrix "${QIIME_DIR}/core-metrics-results/jaccard_distance_matrix.qza" \
+      --o-bray-curtis-distance-matrix "${QIIME_DIR}/core-metrics-results/bray_curtis_distance_matrix.qza" \
+      --o-jaccard-pcoa-results "${QIIME_DIR}/core-metrics-results/jaccard_pcoa_results.qza" \
+      --o-bray-curtis-pcoa-results "${QIIME_DIR}/core-metrics-results/bray_curtis_pcoa_results.qza" \
+      --o-jaccard-emperor "${QIIME_DIR}/core-metrics-results/jaccard_emperor.qzv" \
+      --o-bray-curtis-emperor "${QIIME_DIR}/core-metrics-results/bray_curtis_emperor.qzv"
+    
+    echo "✓ Diversity metrics calculated (without Faith PD)"
   fi
 else
   echo "WARNING: No phylogenetic tree found. Using non-phylogenetic metrics only..."
@@ -441,16 +462,25 @@ else
     --i-table "${QIIME_DIR}/core/table-final.qza" \
     --p-sampling-depth "$SAMPLING_DEPTH" \
     --m-metadata-file "$METADATA_FILE" \
-    --output-dir "${QIIME_DIR}/core-metrics-results"
+    --o-rarefied-table "${QIIME_DIR}/core-metrics-results/rarefied_table.qza" \
+    --o-observed-features-vector "${QIIME_DIR}/core-metrics-results/observed_features_vector.qza" \
+    --o-shannon-vector "${QIIME_DIR}/core-metrics-results/shannon_vector.qza" \
+    --o-evenness-vector "${QIIME_DIR}/core-metrics-results/evenness_vector.qza" \
+    --o-jaccard-distance-matrix "${QIIME_DIR}/core-metrics-results/jaccard_distance_matrix.qza" \
+    --o-bray-curtis-distance-matrix "${QIIME_DIR}/core-metrics-results/bray_curtis_distance_matrix.qza" \
+    --o-jaccard-pcoa-results "${QIIME_DIR}/core-metrics-results/jaccard_pcoa_results.qza" \
+    --o-bray-curtis-pcoa-results "${QIIME_DIR}/core-metrics-results/bray_curtis_pcoa_results.qza" \
+    --o-jaccard-emperor "${QIIME_DIR}/core-metrics-results/jaccard_emperor.qzv" \
+    --o-bray-curtis-emperor "${QIIME_DIR}/core-metrics-results/bray_curtis_emperor.qzv"
+  
+  echo "✓ Diversity metrics calculated (without Faith PD)"
 fi
-
-echo "✓ Diversity metrics calculated!"
 
 # 4.6 Generate Rarefaction Curves ----------------------------------------
 echo ""
 echo "Generating rarefaction curves..."
 
-# Calculate max depth (for rarefaction curve x-axis)
+# Calculate max depth
 MAX_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
   awk -F'\t' '
     NR==1 {for(i=2; i<=NF; i++) header[i]=$i}
@@ -465,48 +495,45 @@ MAX_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" 
 
 echo "Max depth: ${MAX_DEPTH}"
 
-# Rarefaction curves for observed ASVs
+# Standard rarefaction curves
 qiime diversity alpha-rarefaction \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-min-depth 1 \
+  --p-min-depth 10 \
   --p-max-depth "$MAX_DEPTH" \
   --p-steps 20 \
   --m-metadata-file "$METADATA_FILE" \
   --o-visualization "${QIIME_DIR}/visual/rarefaction-curves.qzv"
 
-echo "✓ Rarefaction curves generated: rarefaction-curves.qzv"
+if [ $? -eq 0 ]; then
+  echo "✓ Rarefaction curves generated: rarefaction-curves.qzv"
+else
+  echo "WARNING: Standard rarefaction curves failed"
+fi
 
-# Rarefaction curves with Faith PD (if tree exists)
+# Faith PD rarefaction curves (if tree exists)
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
   echo "Generating Faith PD rarefaction curves..."
   
   qiime diversity alpha-rarefaction \
     --i-table "${QIIME_DIR}/core/table-final.qza" \
     --i-phylogeny "${QIIME_DIR}/core/rooted-tree.qza" \
-    --p-min-depth 1 \
+    --p-min-depth 10 \
     --p-max-depth "$MAX_DEPTH" \
     --p-steps 20 \
     --m-metadata-file "$METADATA_FILE" \
     --o-visualization "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv"
   
-  echo "✓ Faith PD rarefaction curves generated: rarefaction-curves-phylogenetic.qzv"
+  if [ $? -eq 0 ]; then
+    echo "✓ Faith PD rarefaction curves generated: rarefaction-curves-phylogenetic.qzv"
+  else
+    echo "WARNING: Faith PD rarefaction curves failed"
+  fi
 fi
-
-echo ""
-echo "========== RAREFACTION SUMMARY =========="
-echo "Sampling depth used: $SAMPLING_DEPTH reads"
-echo "Max depth in dataset: $MAX_DEPTH reads"
-echo "Visualizations:"
-echo "  - rarefaction-curves.qzv (Observed ASVs + Shannon)"
-if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
-  echo "  - rarefaction-curves-phylogenetic.qzv (Faith PD)"
-fi
-echo "=========================================="
 
 # 4.7 Taxonomy Classification --------------------------------------------
 echo ""
 echo "Assigning Taxonomy..."
-CLASSIFIER_PATH="/scratch_vol0/fungi/dugong_microbiome/05_QIIME2/silva-138.2-ssu-nr99-341f-805r-classifier.qza"
+CLASSIFIER_PATH="/nvme/bio/data_fungi/BioIndic_La_Reunion_Island_seawater_four_month_SED/05_QIIME2/Original_reads_16S/taxonomy/16S/Classifier.qza"
 
 qiime feature-classifier classify-sklearn \
   --i-classifier "$CLASSIFIER_PATH" \
@@ -530,7 +557,7 @@ echo "=========================================================="
 EXPORT_DIR="${QIIME_DIR}/export"
 mkdir -p "${EXPORT_DIR}"
 
-# 5.1 Final feature table (ASV abundance per sample) --------------------
+# 5.1 Final feature table
 echo "Exporting feature table..."
 
 qiime tools export \
@@ -542,12 +569,11 @@ biom convert \
   -o "${EXPORT_DIR}/feature_table/feature-table.tsv" \
   --to-tsv
 
-# Rename OTU to ASV for clarity
 sed -i 's/#OTU ID/#ASV_ID/g' "${EXPORT_DIR}/feature_table/feature-table.tsv" 2>/dev/null || true
 
 echo "✓ Feature table exported"
 
-# 5.2 Representative sequences (ASV sequences in fasta) ------------------
+# 5.2 Representative sequences
 echo "Exporting representative sequences..."
 
 qiime tools export \
@@ -556,7 +582,7 @@ qiime tools export \
 
 echo "✓ Representative sequences exported"
 
-# 5.3 Taxonomy table -----------------------------------------------------
+# 5.3 Taxonomy
 echo "Exporting taxonomy..."
 
 qiime tools export \
@@ -569,7 +595,20 @@ qiime metadata tabulate \
 
 echo "✓ Taxonomy exported"
 
-# 5.4 DADA2 stats --------------------------------------------------------
+# 5.4 Phylogenetic tree
+if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
+  echo "Exporting phylogenetic tree..."
+  
+  qiime tools export \
+    --input-path "${QIIME_DIR}/core/rooted-tree.qza" \
+    --output-path "${EXPORT_DIR}/tree"
+  
+  if [ -f "${EXPORT_DIR}/tree/tree.nwk" ]; then
+    echo "✓ Phylogenetic tree exported: tree/tree.nwk"
+  fi
+fi
+
+# 5.5 DADA2 stats
 echo "Exporting DADA2 stats..."
 
 qiime tools export \
@@ -582,7 +621,7 @@ qiime metadata tabulate \
 
 echo "✓ DADA2 stats exported"
 
-# 5.5 Diversity indices from core-metrics --------------------------------
+# 5.6 Diversity indices from core-metrics
 echo "Exporting diversity indices..."
 
 CORE_METRICS_DIR="${QIIME_DIR}/core-metrics-results"
@@ -609,7 +648,7 @@ if [ -f "${CORE_METRICS_DIR}/evenness_vector.qza" ]; then
     --output-path "${EXPORT_DIR}/diversity/evenness"
 fi
 
-# Faith PD (if tree was computed)
+# Faith PD
 if [ -f "${CORE_METRICS_DIR}/faith_pd_vector.qza" ]; then
   qiime tools export \
     --input-path "${CORE_METRICS_DIR}/faith_pd_vector.qza" \
@@ -619,7 +658,7 @@ fi
 
 echo "✓ Diversity indices exported"
 
-# 5.6 Merge ASV abundance + taxonomy -------------------------------------
+# 5.7 Merge ASV abundance + taxonomy
 echo "Merging ASV abundance and taxonomy..."
 
 python3 << 'EOFPYTHON'
@@ -635,19 +674,16 @@ if not qiime_dir:
 export_dir = os.path.join(qiime_dir, "export")
 
 try:
-    # Load abundance table
     tab = pd.read_csv(
         os.path.join(export_dir, "feature_table", "feature-table.tsv"),
         sep="\t", comment="#", index_col=0
     )
 
-    # Load taxonomy
     tax = pd.read_csv(
         os.path.join(export_dir, "taxonomy", "taxonomy.tsv"),
         sep="\t", index_col=0
     )
 
-    # Merge
     merged = tax.join(tab, how="inner")
     output_file = os.path.join(export_dir, "ASV_abundance_taxonomy.tsv")
     merged.to_csv(output_file, sep="\t")
@@ -657,7 +693,7 @@ except Exception as e:
     sys.exit(1)
 EOFPYTHON
 
-# 5.7 Sample depths ------------------------------------------------------
+# 5.8 Sample depths
 echo "Calculating sample depths..."
 
 python3 << 'EOFPYTHON'
@@ -712,13 +748,13 @@ qiime diversity alpha \
   --p-metric simpson_e \
   --o-alpha-diversity "${DIVERSITY_DIR}/simpson_evenness_vector.qza"
 
-# Chao1 richness estimator
+# Chao1
 qiime diversity alpha \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-metric chao1 \
   --o-alpha-diversity "${DIVERSITY_DIR}/chao1_vector.qza"
 
-# ACE richness estimator
+# ACE
 qiime diversity alpha \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-metric ace \
@@ -736,7 +772,7 @@ qiime diversity alpha \
   --p-metric fisher_alpha \
   --o-alpha-diversity "${DIVERSITY_DIR}/fisher_alpha_vector.qza"
 
-# Berger-Parker dominance
+# Berger-Parker
 qiime diversity alpha \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-metric berger_parker_d \
@@ -748,13 +784,13 @@ qiime diversity alpha \
   --p-metric gini_index \
   --o-alpha-diversity "${DIVERSITY_DIR}/gini_index_vector.qza"
 
-# Brillouin's diversity index
+# Brillouin
 qiime diversity alpha \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-metric brillouin_d \
   --o-alpha-diversity "${DIVERSITY_DIR}/brillouin_vector.qza"
 
-# Strong's dominance
+# Strong
 qiime diversity alpha \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-metric strong \
@@ -772,13 +808,13 @@ qiime diversity alpha \
   --p-metric mcintosh_e \
   --o-alpha-diversity "${DIVERSITY_DIR}/mcintosh_e_vector.qza"
 
-# Margalef richness index
+# Margalef
 qiime diversity alpha \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-metric margalef \
   --o-alpha-diversity "${DIVERSITY_DIR}/margalef_vector.qza"
 
-# Menhinick richness index
+# Menhinick
 qiime diversity alpha \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-metric menhinick \
@@ -786,7 +822,7 @@ qiime diversity alpha \
 
 echo "✓ All alpha diversity indices calculated"
 
-# Export all indices to TSV ----------------------------------------------
+# Export all indices to TSV
 echo ""
 echo "Exporting all diversity indices to TSV format..."
 
@@ -803,7 +839,6 @@ export_diversity_metric() {
           --input-path "$qza_file" \
           --output-path "${EXPORT_DIR}/diversity_all/${output_name}_temp"
         
-        # Rename column header
         sed "1s/.*/sample-id\t${output_name}/" \
           "${EXPORT_DIR}/diversity_all/${output_name}_temp/alpha-diversity.tsv" > \
           "${EXPORT_DIR}/diversity_all/${output_name}.tsv"
@@ -832,63 +867,22 @@ export_diversity_metric "Faith PD" \
   "faith_pd"
 
 # Export additional metrics
-export_diversity_metric "Simpson" \
-  "${DIVERSITY_DIR}/simpson_vector.qza" \
-  "simpson"
+export_diversity_metric "Simpson" "${DIVERSITY_DIR}/simpson_vector.qza" "simpson"
+export_diversity_metric "Simpson Evenness" "${DIVERSITY_DIR}/simpson_evenness_vector.qza" "simpson_evenness"
+export_diversity_metric "Chao1" "${DIVERSITY_DIR}/chao1_vector.qza" "chao1"
+export_diversity_metric "ACE" "${DIVERSITY_DIR}/ace_vector.qza" "ace"
+export_diversity_metric "Goods Coverage" "${DIVERSITY_DIR}/goods_coverage_vector.qza" "goods_coverage"
+export_diversity_metric "Fisher Alpha" "${DIVERSITY_DIR}/fisher_alpha_vector.qza" "fisher_alpha"
+export_diversity_metric "Berger Parker" "${DIVERSITY_DIR}/berger_parker_vector.qza" "berger_parker"
+export_diversity_metric "Gini Index" "${DIVERSITY_DIR}/gini_index_vector.qza" "gini_index"
+export_diversity_metric "Brillouin" "${DIVERSITY_DIR}/brillouin_vector.qza" "brillouin"
+export_diversity_metric "Strong" "${DIVERSITY_DIR}/strong_vector.qza" "strong"
+export_diversity_metric "McIntosh D" "${DIVERSITY_DIR}/mcintosh_d_vector.qza" "mcintosh_d"
+export_diversity_metric "McIntosh E" "${DIVERSITY_DIR}/mcintosh_e_vector.qza" "mcintosh_e"
+export_diversity_metric "Margalef" "${DIVERSITY_DIR}/margalef_vector.qza" "margalef"
+export_diversity_metric "Menhinick" "${DIVERSITY_DIR}/menhinick_vector.qza" "menhinick"
 
-export_diversity_metric "Simpson Evenness" \
-  "${DIVERSITY_DIR}/simpson_evenness_vector.qza" \
-  "simpson_evenness"
-
-export_diversity_metric "Chao1" \
-  "${DIVERSITY_DIR}/chao1_vector.qza" \
-  "chao1"
-
-export_diversity_metric "ACE" \
-  "${DIVERSITY_DIR}/ace_vector.qza" \
-  "ace"
-
-export_diversity_metric "Goods Coverage" \
-  "${DIVERSITY_DIR}/goods_coverage_vector.qza" \
-  "goods_coverage"
-
-export_diversity_metric "Fisher Alpha" \
-  "${DIVERSITY_DIR}/fisher_alpha_vector.qza" \
-  "fisher_alpha"
-
-export_diversity_metric "Berger Parker" \
-  "${DIVERSITY_DIR}/berger_parker_vector.qza" \
-  "berger_parker"
-
-export_diversity_metric "Gini Index" \
-  "${DIVERSITY_DIR}/gini_index_vector.qza" \
-  "gini_index"
-
-export_diversity_metric "Brillouin" \
-  "${DIVERSITY_DIR}/brillouin_vector.qza" \
-  "brillouin"
-
-export_diversity_metric "Strong" \
-  "${DIVERSITY_DIR}/strong_vector.qza" \
-  "strong"
-
-export_diversity_metric "McIntosh D" \
-  "${DIVERSITY_DIR}/mcintosh_d_vector.qza" \
-  "mcintosh_d"
-
-export_diversity_metric "McIntosh E" \
-  "${DIVERSITY_DIR}/mcintosh_e_vector.qza" \
-  "mcintosh_e"
-
-export_diversity_metric "Margalef" \
-  "${DIVERSITY_DIR}/margalef_vector.qza" \
-  "margalef"
-
-export_diversity_metric "Menhinick" \
-  "${DIVERSITY_DIR}/menhinick_vector.qza" \
-  "menhinick"
-
-# Merge all indices into comprehensive table -----------------------------
+# Merge all indices into comprehensive table
 echo ""
 echo "Merging all diversity indices into a single table..."
 
@@ -905,7 +899,6 @@ if not qiime_dir:
 
 diversity_dir = Path(qiime_dir) / "export" / "diversity_all"
 
-# List all TSV files
 tsv_files = sorted(diversity_dir.glob("*.tsv"))
 
 if not tsv_files:
@@ -915,10 +908,8 @@ if not tsv_files:
 print(f"Found {len(tsv_files)} diversity files to merge")
 
 try:
-    # Read first file as base
     df_merged = pd.read_csv(tsv_files[0], sep="\t", index_col=0)
 
-    # Merge all other files
     for tsv_file in tsv_files[1:]:
         try:
             df_temp = pd.read_csv(tsv_file, sep="\t", index_col=0)
@@ -926,10 +917,8 @@ try:
         except Exception as e:
             print(f"Warning: Could not merge {tsv_file.name}: {e}")
 
-    # Sort by sample name
     df_merged = df_merged.sort_index()
 
-    # Save comprehensive table
     output_file = diversity_dir.parent / "diversity_indices_all.tsv"
     df_merged.to_csv(output_file, sep="\t")
 
@@ -964,6 +953,9 @@ echo "  - All diversity indices: ${EXPORT_DIR}/diversity_indices_all.tsv"
 echo "  - Rarefaction curves: ${QIIME_DIR}/visual/rarefaction-curves.qzv"
 if [ -f "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" ]; then
   echo "  - Faith PD rarefaction: ${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv"
+fi
+if [ -f "${EXPORT_DIR}/tree/tree.nwk" ]; then
+  echo "  - Phylogenetic tree: ${EXPORT_DIR}/tree/tree.nwk"
 fi
 echo ""
 echo "All outputs are in: $QIIME_DIR"
