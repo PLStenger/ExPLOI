@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========================================================================================================
-# ExPLOI Project - 16S Metabarcoding Pipeline (CORRECTED VERSION)
+# ExPLOI Project - 16S Metabarcoding Pipeline (FINAL CORRECTED VERSION)
 # ========================================================================================================
 #
 # This script performs the complete metabarcoding analysis pipeline:
@@ -26,6 +26,9 @@ METADATA_FILE="${BASE_DIR}/metadata_ExPLOI.tsv"
 MANIFEST_FILE="${BASE_DIR}/manifest_ExPLOI.txt"
 ADAPTER_FILE="/nvme/bio/data_fungi/valormicro_nc/99_softwares/adapters/sequences.fasta"
 THREADS=16
+
+# CRITICAL: Export QIIME_DIR for Python scripts
+export QIIME_DIR="${QIIME_DIR}"
 
 # --- Create Directory Structure ---
 mkdir -p "$QC_DIR" "$CLEANED_DIR" "$POST_CLEAN_QC_DIR" "$QIIME_DIR"
@@ -177,7 +180,7 @@ echo ""
 echo "Generated manifest:"
 cat "$MANIFEST_FILE"
 echo ""
-echo "Number of samples in manifest: $(wc -l < "$MANIFEST_FILE")"
+echo "Number of samples in manifest: $(tail -n +2 "$MANIFEST_FILE" | wc -l)"
 
 # =======================================================================
 # STEP 4: QIIME2 Analysis
@@ -257,12 +260,13 @@ biom convert \
   -o "${QIIME_DIR}/export/neg-controls/feature-table.tsv" \
   --to-tsv
 
-# Extract ASV IDs (skip header and first comment line)
+# CORRECTION: Add proper header for QIIME2 metadata format
+echo "feature-id" > "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
 tail -n +3 "${QIIME_DIR}/export/neg-controls/feature-table.tsv" | \
-  cut -f1 > "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
+  cut -f1 >> "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
 
-# Step 2b: Check if we found contaminant ASVs
-NUM_CONTAMINANTS=$(wc -l < "${QIIME_DIR}/export/neg-controls/contamination_ids.txt")
+# Step 2b: Check if we found contaminant ASVs (exclude header)
+NUM_CONTAMINANTS=$(tail -n +2 "${QIIME_DIR}/export/neg-controls/contamination_ids.txt" | wc -l)
 echo "Found ${NUM_CONTAMINANTS} contaminant ASVs in negative controls"
 
 if [ "$NUM_CONTAMINANTS" -eq 0 ]; then
@@ -374,7 +378,7 @@ MIN_DEPTH=1000
 # Calculate sampling depth (10th percentile)
 SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
   awk -F'\t' '
-    NR==1 {for(i=2; i<=NF; i++) header[i]=$i}
+    NR==1 {for(i=2; i<=NF; i++) header[i]=$i; next}
     {for(i=2; i<=NF; i++) sum[header[i]]+=$i}
     END {
       count = 0
@@ -387,7 +391,7 @@ SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.
         asort(depths)
         idx = int(count * 0.1)
         if(idx < 1) idx = 1
-        print depths[idx]
+        print int(depths[idx])
       }
     }' | \
   sort -n | head -1)
@@ -396,9 +400,9 @@ if [ -z "$SAMPLING_DEPTH" ] || [ "$SAMPLING_DEPTH" -lt "$MIN_DEPTH" ]; then
   echo "WARNING: No samples above $MIN_DEPTH reads. Using median depth instead."
   SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
     awk -F'\t' '
-      NR==1 {for(i=2; i<=NF; i++) header[i]=$i}
+      NR==1 {for(i=2; i<=NF; i++) header[i]=$i; next}
       {for(i=2; i<=NF; i++) sum[header[i]]+=$i}
-      END {for(sample in sum) print sum[sample]}' | \
+      END {for(sample in sum) print int(sum[sample])}' | \
     sort -n | awk '{a[NR]=$0} END {print a[int(NR/2)]}')
 fi
 
@@ -480,20 +484,26 @@ fi
 echo ""
 echo "Generating rarefaction curves..."
 
-# Calculate max depth
+# CORRECTION: Calculate max depth ONLY from real samples (not including negatives or phantom samples)
 MAX_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
   awk -F'\t' '
-    NR==1 {for(i=2; i<=NF; i++) header[i]=$i}
+    NR==1 {for(i=2; i<=NF; i++) header[i]=$i; next}
     {for(i=2; i<=NF; i++) sum[header[i]]+=$i}
     END {
       max = 0
       for(sample in sum) {
         if(sum[sample] > max) max = sum[sample]
       }
-      print max
+      print int(max)
     }')
 
-echo "Max depth: ${MAX_DEPTH}"
+# Safety check for unreasonable MAX_DEPTH
+if [ "$MAX_DEPTH" -gt 100000 ] || [ "$MAX_DEPTH" -lt 1000 ]; then
+  echo "WARNING: MAX_DEPTH seems incorrect ($MAX_DEPTH). Using 50000 instead."
+  MAX_DEPTH=50000
+fi
+
+echo "Max depth for rarefaction: ${MAX_DEPTH}"
 
 # Standard rarefaction curves
 qiime diversity alpha-rarefaction \
@@ -661,14 +671,15 @@ echo "✓ Diversity indices exported"
 # 5.7 Merge ASV abundance + taxonomy
 echo "Merging ASV abundance and taxonomy..."
 
-python3 << 'EOFPYTHON'
+# CORRECTION: Remove quotes from EOFPYTHON to allow variable expansion
+python3 << EOFPYTHON
 import pandas as pd
 import os
 import sys
 
-qiime_dir = os.getenv("QIIME_DIR")
+qiime_dir = "${QIIME_DIR}"
 if not qiime_dir:
-    print("ERROR: QIIME_DIR environment variable not set!")
+    print("ERROR: QIIME_DIR not available!")
     sys.exit(1)
 
 export_dir = os.path.join(qiime_dir, "export")
@@ -696,14 +707,14 @@ EOFPYTHON
 # 5.8 Sample depths
 echo "Calculating sample depths..."
 
-python3 << 'EOFPYTHON'
+python3 << EOFPYTHON
 import pandas as pd
 import os
 import sys
 
-qiime_dir = os.getenv("QIIME_DIR")
+qiime_dir = "${QIIME_DIR}"
 if not qiime_dir:
-    print("ERROR: QIIME_DIR environment variable not set!")
+    print("ERROR: QIIME_DIR not available!")
     sys.exit(1)
 
 export_dir = os.path.join(qiime_dir, "export")
@@ -886,15 +897,15 @@ export_diversity_metric "Menhinick" "${DIVERSITY_DIR}/menhinick_vector.qza" "men
 echo ""
 echo "Merging all diversity indices into a single table..."
 
-python3 << 'EOFPYTHON'
+python3 << EOFPYTHON
 import pandas as pd
 import os
 import sys
 from pathlib import Path
 
-qiime_dir = os.getenv("QIIME_DIR")
+qiime_dir = "${QIIME_DIR}"
 if not qiime_dir:
-    print("ERROR: QIIME_DIR environment variable not set!")
+    print("ERROR: QIIME_DIR not available!")
     sys.exit(1)
 
 diversity_dir = Path(qiime_dir) / "export" / "diversity_all"
