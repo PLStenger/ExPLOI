@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========================================================================================================
-# ExPLOI Project - 16S Metabarcoding Pipeline (FINAL CORRECTED VERSION)
+# ExPLOI Project - 16S Metabarcoding Pipeline (ULTRA-CORRECTED VERSION)
 # ========================================================================================================
 #
 # This script performs the complete metabarcoding analysis pipeline:
@@ -9,9 +9,12 @@
 # 2. Adapter Trimming & Filtering (Trimmomatic)
 # 3. QIIME2 Pipeline (Import, Denoise, Taxonomy, Rarefaction, Diversity)
 #
-# CLUSTER CONFIGURATION:
-# - Ensure Conda environments 'fastqc', 'multiqc', 'trimmomatic', and 'qiime2-amplicon-2024.10' are available.
-# - Adjust THREADS variable based on your cluster allocation.
+# FIXES:
+# - Negative control handling (skip if empty)
+# - Proper sample name parsing in feature table export
+# - Correct MAX_DEPTH calculation from read counts (not sample names)
+# - Comprehensive diversity table with rarefaction depth column
+# - Export of rarefaction data (Shannon, Observed Features)
 #
 # ========================================================================================================
 
@@ -243,62 +246,87 @@ qiime feature-table filter-samples \
   --i-table "${QIIME_DIR}/core/table.qza" \
   --m-metadata-file "$METADATA_FILE" \
   --p-where "[group]='Negative_Control'" \
-  --o-filtered-table "${QIIME_DIR}/core/neg-controls-table.qza"
+  --o-filtered-table "${QIIME_DIR}/core/neg-controls-table.qza" 2>&1
 
-# Step 1b: Check if negative control has any sequences
-qiime feature-table summarize \
-  --i-table "${QIIME_DIR}/core/neg-controls-table.qza" \
-  --o-visualization "${QIIME_DIR}/visual/neg-controls-summary.qzv"
+NEG_CONTROL_STATUS=$?
 
-# Step 2: Get list of ASV IDs from negative controls
-qiime tools export \
-  --input-path "${QIIME_DIR}/core/neg-controls-table.qza" \
-  --output-path "${QIIME_DIR}/export/neg-controls"
-
-biom convert \
-  -i "${QIIME_DIR}/export/neg-controls/feature-table.biom" \
-  -o "${QIIME_DIR}/export/neg-controls/feature-table.tsv" \
-  --to-tsv
-
-# CORRECTION: Add proper header for QIIME2 metadata format
-echo "feature-id" > "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
-tail -n +3 "${QIIME_DIR}/export/neg-controls/feature-table.tsv" | \
-  cut -f1 >> "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
-
-# Step 2b: Check if we found contaminant ASVs (exclude header)
-NUM_CONTAMINANTS=$(tail -n +2 "${QIIME_DIR}/export/neg-controls/contamination_ids.txt" | wc -l)
-echo "Found ${NUM_CONTAMINANTS} contaminant ASVs in negative controls"
-
-if [ "$NUM_CONTAMINANTS" -eq 0 ]; then
-  echo "WARNING: No contaminants found in negative control!"
-  echo "Skipping decontamination step."
+if [ $NEG_CONTROL_STATUS -ne 0 ]; then
+  echo "⚠️  WARNING: Negative control table is EMPTY (no reads in negative control)"
+  echo "   This likely means BL_PCR_Jourand has 0 reads."
+  echo "   Skipping decontamination step - using original table."
   
-  # Just copy the original table
+  # Copy original table as "decontaminated" and "final"
   cp "${QIIME_DIR}/core/table.qza" "${QIIME_DIR}/core/table-decontam.qza"
   cp "${QIIME_DIR}/core/rep-seqs.qza" "${QIIME_DIR}/core/rep-seqs-clean.qza"
-else
-  # Step 3: Remove contaminating ASVs from main table
-  qiime feature-table filter-features \
-    --i-table "${QIIME_DIR}/core/table.qza" \
-    --m-metadata-file "${QIIME_DIR}/export/neg-controls/contamination_ids.txt" \
-    --p-exclude-ids \
-    --o-filtered-table "${QIIME_DIR}/core/table-decontam.qza"
-
-  # Step 4: Filter representative sequences to match
-  qiime feature-table filter-seqs \
-    --i-data "${QIIME_DIR}/core/rep-seqs.qza" \
+  
+  # Remove negative control samples from table
+  qiime feature-table filter-samples \
     --i-table "${QIIME_DIR}/core/table-decontam.qza" \
-    --o-filtered-data "${QIIME_DIR}/core/rep-seqs-clean.qza"
+    --m-metadata-file "$METADATA_FILE" \
+    --p-where "[group]='Sample'" \
+    --o-filtered-table "${QIIME_DIR}/core/table-final.qza"
+  
+  echo "✓ Negative control removed (but no ASVs filtered since control was empty)"
+  
+else
+  # Negative control has reads - proceed with decontamination
+  echo "✓ Negative control table created successfully"
+  
+  # Step 1b: Check if negative control has any sequences
+  qiime feature-table summarize \
+    --i-table "${QIIME_DIR}/core/neg-controls-table.qza" \
+    --o-visualization "${QIIME_DIR}/visual/neg-controls-summary.qzv"
+
+  # Step 2: Get list of ASV IDs from negative controls
+  qiime tools export \
+    --input-path "${QIIME_DIR}/core/neg-controls-table.qza" \
+    --output-path "${QIIME_DIR}/export/neg-controls"
+
+  biom convert \
+    -i "${QIIME_DIR}/export/neg-controls/feature-table.biom" \
+    -o "${QIIME_DIR}/export/neg-controls/feature-table.tsv" \
+    --to-tsv
+
+  # Add proper header for QIIME2 metadata format
+  echo "feature-id" > "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
+  tail -n +3 "${QIIME_DIR}/export/neg-controls/feature-table.tsv" | \
+    cut -f1 >> "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
+
+  # Step 2b: Check if we found contaminant ASVs (exclude header)
+  NUM_CONTAMINANTS=$(tail -n +2 "${QIIME_DIR}/export/neg-controls/contamination_ids.txt" | wc -l)
+  echo "Found ${NUM_CONTAMINANTS} contaminant ASVs in negative controls"
+
+  if [ "$NUM_CONTAMINANTS" -eq 0 ]; then
+    echo "WARNING: No contaminants found in negative control!"
+    echo "Skipping decontamination step."
+    
+    # Just copy the original table
+    cp "${QIIME_DIR}/core/table.qza" "${QIIME_DIR}/core/table-decontam.qza"
+    cp "${QIIME_DIR}/core/rep-seqs.qza" "${QIIME_DIR}/core/rep-seqs-clean.qza"
+  else
+    # Step 3: Remove contaminating ASVs from main table
+    qiime feature-table filter-features \
+      --i-table "${QIIME_DIR}/core/table.qza" \
+      --m-metadata-file "${QIIME_DIR}/export/neg-controls/contamination_ids.txt" \
+      --p-exclude-ids \
+      --o-filtered-table "${QIIME_DIR}/core/table-decontam.qza"
+
+    # Step 4: Filter representative sequences to match
+    qiime feature-table filter-seqs \
+      --i-data "${QIIME_DIR}/core/rep-seqs.qza" \
+      --i-table "${QIIME_DIR}/core/table-decontam.qza" \
+      --o-filtered-data "${QIIME_DIR}/core/rep-seqs-clean.qza"
+  fi
+
+  # Step 5: Remove Negative Control samples from the table
+  qiime feature-table filter-samples \
+    --i-table "${QIIME_DIR}/core/table-decontam.qza" \
+    --m-metadata-file "$METADATA_FILE" \
+    --p-where "[group]='Sample'" \
+    --o-filtered-table "${QIIME_DIR}/core/table-final.qza"
+
+  echo "✓ Decontamination complete. Final table: table-final.qza"
 fi
-
-# Step 5: Remove Negative Control samples from the table
-qiime feature-table filter-samples \
-  --i-table "${QIIME_DIR}/core/table-decontam.qza" \
-  --m-metadata-file "$METADATA_FILE" \
-  --p-where "[group]='Sample'" \
-  --o-filtered-table "${QIIME_DIR}/core/table-final.qza"
-
-echo "✓ Decontamination complete. Final table: table-final.qza"
 
 # 4.4 Build Phylogenetic Tree --------------------------------------------
 echo ""
@@ -375,38 +403,62 @@ biom convert \
 
 MIN_DEPTH=1000
 
-# Calculate sampling depth (10th percentile)
-SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
-  awk -F'\t' '
-    NR==1 {for(i=2; i<=NF; i++) header[i]=$i; next}
-    {for(i=2; i<=NF; i++) sum[header[i]]+=$i}
-    END {
-      count = 0
-      for(sample in sum) {
-        if(sum[sample] > '$MIN_DEPTH') {
-          depths[count++] = sum[sample]
-        }
-      }
-      if(count > 0) {
-        asort(depths)
-        idx = int(count * 0.1)
-        if(idx < 1) idx = 1
-        print int(depths[idx])
-      }
-    }' | \
-  sort -n | head -1)
+# CORRECTION: Calculate depths using Python to ensure correct parsing
+echo "Calculating sample depths..."
 
-if [ -z "$SAMPLING_DEPTH" ] || [ "$SAMPLING_DEPTH" -lt "$MIN_DEPTH" ]; then
-  echo "WARNING: No samples above $MIN_DEPTH reads. Using median depth instead."
-  SAMPLING_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
-    awk -F'\t' '
-      NR==1 {for(i=2; i<=NF; i++) header[i]=$i; next}
-      {for(i=2; i<=NF; i++) sum[header[i]]+=$i}
-      END {for(sample in sum) print int(sum[sample])}' | \
-    sort -n | awk '{a[NR]=$0} END {print a[int(NR/2)]}')
-fi
+python3 << EOFPYTHON
+import pandas as pd
+
+# Read feature table
+df = pd.read_csv(
+    "${QIIME_DIR}/export/table-final-temp/feature-table.tsv",
+    sep="\t",
+    skiprows=1,  # Skip comment line
+    index_col=0
+)
+
+# Calculate read depths per sample
+depths = df.sum(axis=0).astype(int)
+
+# Save with proper sample names
+depths_file = "${QIIME_DIR}/export/sample_depths_temp.txt"
+with open(depths_file, 'w') as f:
+    for sample, count in depths.items():
+        f.write(f"{sample}\t{count}\n")
+
+print(f"Sample depths saved to: {depths_file}")
+print(f"Number of samples: {len(depths)}")
+print(f"Min depth: {depths.min()}")
+print(f"Max depth: {depths.max()}")
+print(f"Median depth: {int(depths.median())}")
+
+# Calculate 10th percentile for rarefaction
+filtered_depths = depths[depths >= ${MIN_DEPTH}]
+if len(filtered_depths) > 0:
+    sampling_depth = int(filtered_depths.quantile(0.1))
+else:
+    sampling_depth = int(depths.median())
+
+print(f"Recommended sampling depth (10th percentile): {sampling_depth}")
+
+# Save sampling depth to file
+with open("${QIIME_DIR}/export/sampling_depth.txt", 'w') as f:
+    f.write(str(sampling_depth))
+
+# Save max depth for rarefaction curves
+max_depth = int(depths.max())
+with open("${QIIME_DIR}/export/max_depth.txt", 'w') as f:
+    f.write(str(max_depth))
+    
+print(f"Max depth for rarefaction curves: {max_depth}")
+EOFPYTHON
+
+# Read calculated values
+SAMPLING_DEPTH=$(cat "${QIIME_DIR}/export/sampling_depth.txt")
+MAX_DEPTH=$(cat "${QIIME_DIR}/export/max_depth.txt")
 
 echo "Selected Sampling Depth: $SAMPLING_DEPTH"
+echo "Max Depth for rarefaction curves: $MAX_DEPTH"
 
 # Run core-metrics with phylogenetic tree if available
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
@@ -484,28 +536,7 @@ fi
 echo ""
 echo "Generating rarefaction curves..."
 
-# CORRECTION: Calculate max depth ONLY from real samples (not including negatives or phantom samples)
-MAX_DEPTH=$(tail -n +3 "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" | \
-  awk -F'\t' '
-    NR==1 {for(i=2; i<=NF; i++) header[i]=$i; next}
-    {for(i=2; i<=NF; i++) sum[header[i]]+=$i}
-    END {
-      max = 0
-      for(sample in sum) {
-        if(sum[sample] > max) max = sum[sample]
-      }
-      print int(max)
-    }')
-
-# Safety check for unreasonable MAX_DEPTH
-if [ "$MAX_DEPTH" -gt 100000 ] || [ "$MAX_DEPTH" -lt 1000 ]; then
-  echo "WARNING: MAX_DEPTH seems incorrect ($MAX_DEPTH). Using 50000 instead."
-  MAX_DEPTH=50000
-fi
-
-echo "Max depth for rarefaction: ${MAX_DEPTH}"
-
-# Standard rarefaction curves
+# Standard rarefaction curves (Shannon + Observed Features)
 qiime diversity alpha-rarefaction \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-min-depth 10 \
@@ -543,7 +574,7 @@ fi
 # 4.7 Taxonomy Classification --------------------------------------------
 echo ""
 echo "Assigning Taxonomy..."
-CLASSIFIER_PATH="/nvme/bio/data_fungi/BioIndic_La_Reunion_Island_seawater_four_month_SED/05_QIIME2/Original_reads_16S/taxonomy/16S/Classifier.qza"
+CLASSIFIER_PATH="/scratch_vol0/fungi/dugong_microbiome/05_QIIME2/silva-138.2-ssu-nr99-341f-805r-classifier.qza"
 
 qiime feature-classifier classify-sklearn \
   --i-classifier "$CLASSIFIER_PATH" \
@@ -671,17 +702,12 @@ echo "✓ Diversity indices exported"
 # 5.7 Merge ASV abundance + taxonomy
 echo "Merging ASV abundance and taxonomy..."
 
-# CORRECTION: Remove quotes from EOFPYTHON to allow variable expansion
 python3 << EOFPYTHON
 import pandas as pd
 import os
 import sys
 
 qiime_dir = "${QIIME_DIR}"
-if not qiime_dir:
-    print("ERROR: QIIME_DIR not available!")
-    sys.exit(1)
-
 export_dir = os.path.join(qiime_dir, "export")
 
 try:
@@ -704,34 +730,48 @@ except Exception as e:
     sys.exit(1)
 EOFPYTHON
 
-# 5.8 Sample depths
-echo "Calculating sample depths..."
+# 5.8 Sample depths WITH PROPER NAMES
+echo "Calculating sample depths with proper names..."
 
 python3 << EOFPYTHON
 import pandas as pd
 import os
-import sys
 
 qiime_dir = "${QIIME_DIR}"
-if not qiime_dir:
-    print("ERROR: QIIME_DIR not available!")
-    sys.exit(1)
-
 export_dir = os.path.join(qiime_dir, "export")
 
-try:
-    tab = pd.read_csv(
-        os.path.join(export_dir, "feature_table", "feature-table.tsv"),
-        sep="\t", comment="#", index_col=0
-    )
+# Read feature table with proper parsing
+df = pd.read_csv(
+    os.path.join(export_dir, "feature_table", "feature-table.tsv"),
+    sep="\t",
+    skiprows=1,  # Skip the comment line
+    index_col=0
+)
 
-    depths = tab.sum(axis=0)
-    output_file = os.path.join(export_dir, "sample_read_depths_final.tsv")
-    depths.to_csv(output_file, sep="\t", header=["reads"])
-    print(f"✓ Sample depths saved: {output_file}")
-except Exception as e:
-    print(f"ERROR in calculating depths: {e}")
-    sys.exit(1)
+# Calculate read depths per sample
+depths = df.sum(axis=0).astype(int)
+
+# Add rarefaction depth column
+sampling_depth = ${SAMPLING_DEPTH}
+
+# Create comprehensive table
+depths_df = pd.DataFrame({
+    'sample_id': depths.index,
+    'total_reads': depths.values,
+    'rarefaction_depth': [sampling_depth] * len(depths)
+})
+
+# Sort by sample name
+depths_df = depths_df.sort_values('sample_id')
+
+# Save
+output_file = os.path.join(export_dir, "sample_read_depths_final.tsv")
+depths_df.to_csv(output_file, sep="\t", index=False)
+
+print(f"✓ Sample depths saved: {output_file}")
+print(f"  Samples: {len(depths_df)}")
+print(f"  Total reads range: {depths_df['total_reads'].min()} - {depths_df['total_reads'].max()}")
+print(f"  Rarefaction depth: {sampling_depth}")
 EOFPYTHON
 
 # =======================================================================
@@ -893,7 +933,7 @@ export_diversity_metric "McIntosh E" "${DIVERSITY_DIR}/mcintosh_e_vector.qza" "m
 export_diversity_metric "Margalef" "${DIVERSITY_DIR}/margalef_vector.qza" "margalef"
 export_diversity_metric "Menhinick" "${DIVERSITY_DIR}/menhinick_vector.qza" "menhinick"
 
-# Merge all indices into comprehensive table
+# Merge all indices into comprehensive table WITH RAREFACTION DEPTH
 echo ""
 echo "Merging all diversity indices into a single table..."
 
@@ -904,10 +944,6 @@ import sys
 from pathlib import Path
 
 qiime_dir = "${QIIME_DIR}"
-if not qiime_dir:
-    print("ERROR: QIIME_DIR not available!")
-    sys.exit(1)
-
 diversity_dir = Path(qiime_dir) / "export" / "diversity_all"
 
 tsv_files = sorted(diversity_dir.glob("*.tsv"))
@@ -928,6 +964,10 @@ try:
         except Exception as e:
             print(f"Warning: Could not merge {tsv_file.name}: {e}")
 
+    # Add rarefaction depth column
+    sampling_depth = ${SAMPLING_DEPTH}
+    df_merged.insert(0, 'rarefaction_depth', sampling_depth)
+    
     df_merged = df_merged.sort_index()
 
     output_file = diversity_dir.parent / "diversity_indices_all.tsv"
@@ -937,6 +977,7 @@ try:
     print(f"  {output_file}")
     print(f"\n✓ Number of samples: {len(df_merged)}")
     print(f"✓ Number of indices: {len(df_merged.columns)}")
+    print(f"✓ Rarefaction depth: {sampling_depth}")
     print(f"\nColumns included:")
     for col in df_merged.columns:
         print(f"  - {col}")
@@ -946,6 +987,49 @@ except Exception as e:
     sys.exit(1)
 
 EOFPYTHON
+
+# =======================================================================
+# STEP 7: EXPORT RAREFACTION CURVE DATA
+# =======================================================================
+echo ""
+echo "=========================================================="
+echo "STEP 7: Exporting Rarefaction Curve Data"
+echo "=========================================================="
+
+# Export rarefaction QZV to extract data
+mkdir -p "${EXPORT_DIR}/rarefaction_data"
+
+if [ -f "${QIIME_DIR}/visual/rarefaction-curves.qzv" ]; then
+  echo "Extracting rarefaction curve data (Shannon + Observed Features)..."
+  
+  # Unzip QZV
+  unzip -q "${QIIME_DIR}/visual/rarefaction-curves.qzv" -d "${EXPORT_DIR}/rarefaction_data/temp"
+  
+  # Find and copy CSV files
+  find "${EXPORT_DIR}/rarefaction_data/temp" -name "*.csv" -exec cp {} "${EXPORT_DIR}/rarefaction_data/" \;
+  
+  # Cleanup
+  rm -rf "${EXPORT_DIR}/rarefaction_data/temp"
+  
+  echo "✓ Rarefaction data exported to: ${EXPORT_DIR}/rarefaction_data/"
+  echo "  Files available:"
+  ls -1 "${EXPORT_DIR}/rarefaction_data/"*.csv 2>/dev/null || echo "  (No CSV files found - data may be in JSON format)"
+fi
+
+if [ -f "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" ]; then
+  echo "Extracting Faith PD rarefaction curve data..."
+  
+  # Unzip QZV
+  unzip -q "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" -d "${EXPORT_DIR}/rarefaction_data/temp_faith"
+  
+  # Find and copy CSV files
+  find "${EXPORT_DIR}/rarefaction_data/temp_faith" -name "*.csv" -exec cp {} "${EXPORT_DIR}/rarefaction_data/" \;
+  
+  # Cleanup
+  rm -rf "${EXPORT_DIR}/rarefaction_data/temp_faith"
+  
+  echo "✓ Faith PD rarefaction data exported"
+fi
 
 # =======================================================================
 # PIPELINE COMPLETION
@@ -960,6 +1044,7 @@ echo "  - Feature table: ${EXPORT_DIR}/feature_table/feature-table.tsv"
 echo "  - ASV sequences: ${EXPORT_DIR}/rep_seqs/dna-sequences.fasta"
 echo "  - Taxonomy: ${EXPORT_DIR}/taxonomy/taxonomy.tsv"
 echo "  - ASV + Taxonomy merged: ${EXPORT_DIR}/ASV_abundance_taxonomy.tsv"
+echo "  - Sample read depths: ${EXPORT_DIR}/sample_read_depths_final.tsv"
 echo "  - All diversity indices: ${EXPORT_DIR}/diversity_indices_all.tsv"
 echo "  - Rarefaction curves: ${QIIME_DIR}/visual/rarefaction-curves.qzv"
 if [ -f "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" ]; then
@@ -968,6 +1053,10 @@ fi
 if [ -f "${EXPORT_DIR}/tree/tree.nwk" ]; then
   echo "  - Phylogenetic tree: ${EXPORT_DIR}/tree/tree.nwk"
 fi
+echo "  - Rarefaction data (CSV): ${EXPORT_DIR}/rarefaction_data/"
+echo ""
+echo "Rarefaction depth used: ${SAMPLING_DEPTH} reads"
+echo "Max depth in dataset: ${MAX_DEPTH} reads"
 echo ""
 echo "All outputs are in: $QIIME_DIR"
 echo "=========================================================="
