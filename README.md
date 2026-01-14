@@ -29,3 +29,4 @@ For install QIIME2, please refer to http://qiime.org/install/install.html
 ### Run by :   
 
     time nohup bash pipeline.sh &> pipeline.out
+    time nohup bash pipeline-raw-data.sh &> pipeline-raw-data.out
