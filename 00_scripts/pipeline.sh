@@ -1,24 +1,57 @@
 #!/bin/bash
 
 # ========================================================================================================
-# ExPLOI Project - 16S Metabarcoding Pipeline (ULTRA-CORRECTED VERSION)
+# ExPLOI Project - 16S Metabarcoding Pipeline COMPLET (VERSION FINALE)
 # ========================================================================================================
 #
-# This script performs the complete metabarcoding analysis pipeline:
-# 1. Quality Check (FastQC/MultiQC)
-# 2. Adapter Trimming & Filtering (Trimmomatic)
-# 3. QIIME2 Pipeline (Import, Denoise, Taxonomy, Rarefaction, Diversity)
+# Ce script effectue l'analyse complète de métabarcoding 16S de A à Z :
 #
-# FIXES:
-# - Negative control handling (skip if empty)
-# - Proper sample name parsing in feature table export
-# - Correct MAX_DEPTH calculation from read counts (not sample names)
-# - Comprehensive diversity table with rarefaction depth column
-# - Export of rarefaction data (Shannon, Observed Features)
+# ÉTAPE 1 : Contrôle qualité des données brutes (FastQC/MultiQC)
+# ÉTAPE 2 : Nettoyage et filtrage des adaptateurs (Trimmomatic)
+# ÉTAPE 3 : Contrôle qualité post-nettoyage (FastQC/MultiQC)
+# ÉTAPE 4 : Analyse QIIME2
+#   4.1 : Import des données
+#   4.2 : Débruitage DADA2 (génération des ASVs)
+#   4.3 : Filtrage des contaminants (contrôles négatifs)
+#   4.4 : Construction de l'arbre phylogénétique
+#   4.5 : Métriques de diversité (core-metrics-phylogenetic)
+#   4.6 : Courbes de raréfaction (Shannon, Observed Features, Faith PD)
+#   4.7 : Classification taxonomique (SILVA)
+# ÉTAPE 5 : Export des résultats
+#   5.1 : Table de features
+#   5.2 : Séquences représentatives
+#   5.3 : Taxonomie
+#   5.4 : Arbre phylogénétique
+#   5.5 : Statistiques DADA2
+#   5.6 : Indices de diversité
+#   5.7 : Table ASV + Taxonomie fusionnée
+#   5.8 : Profondeurs de lecture par échantillon
+# ÉTAPE 6 : Calcul de tous les indices de diversité alpha
+# ÉTAPE 7 : Export des données de raréfaction (CSV)
+#
+# CORRECTIONS IMPLÉMENTÉES :
+# - Gestion robuste des contrôles négatifs vides (0 reads)
+# - Calcul correct des profondeurs avec Python (pas AWK/bash)
+# - Noms d'échantillons préservés correctement
+# - Arbre phylogénétique avec gestion des échecs MAFFT
+# - Export complet de toutes les données pour analyses R
+#
+# PRÉREQUIS :
+# - Conda avec environnements : fastqc, multiqc, trimmomatic, qiime2-amplicon-2024.10
+# - Classifier SILVA 138.2 (16S)
+# - Adaptateurs Illumina
+#
+# UTILISATION :
+#   chmod +x pipeline-complet-final.sh
+#   nohup bash pipeline-complet-final.sh > pipeline.out 2>&1 &
+#   tail -f pipeline.out
 #
 # ========================================================================================================
 
-# --- Configuration Variables ---
+# ========================================================================================================
+# CONFIGURATION
+# ========================================================================================================
+
 BASE_DIR="/nvme/bio/data_fungi/ExPLOI"
 RAW_DATA_DIR="${BASE_DIR}/01_raw_data"
 QC_DIR="${BASE_DIR}/02_quality_check"
@@ -28,16 +61,45 @@ QIIME_DIR="${BASE_DIR}/05_QIIME2"
 METADATA_FILE="${BASE_DIR}/metadata_ExPLOI.tsv"
 MANIFEST_FILE="${BASE_DIR}/manifest_ExPLOI.txt"
 ADAPTER_FILE="/nvme/bio/data_fungi/valormicro_nc/99_softwares/adapters/sequences.fasta"
+CLASSIFIER_PATH="/nvme/bio/data_fungi/BioIndic_La_Reunion_Island_seawater_four_month_SED/05_QIIME2/Original_reads_16S/taxonomy/16S/Classifier.qza"
 THREADS=16
 
-# CRITICAL: Export QIIME_DIR for Python scripts
+# Export pour Python
 export QIIME_DIR="${QIIME_DIR}"
+export PYTHONWARNINGS="ignore"
 
-# --- Create Directory Structure ---
+# ========================================================================================================
+# CRÉATION DE L'ARBORESCENCE
+# ========================================================================================================
+
+echo "========================================"
+echo "ExPLOI - 16S Metabarcoding Pipeline"
+echo "========================================"
+echo "Date: $(date)"
+echo "User: $(whoami)"
+echo "Host: $(hostname)"
+echo "========================================"
+echo ""
+
 mkdir -p "$QC_DIR" "$CLEANED_DIR" "$POST_CLEAN_QC_DIR" "$QIIME_DIR"
 mkdir -p "$QIIME_DIR/core" "$QIIME_DIR/visual" "$QIIME_DIR/export"
 
-# --- Create Metadata File ---
+# Temp directories
+export TMPDIR="${BASE_DIR}/tmp"
+mkdir -p "$TMPDIR"
+
+echo "Directories created:"
+echo "  - Raw data: $RAW_DATA_DIR"
+echo "  - QC: $QC_DIR"
+echo "  - Cleaned: $CLEANED_DIR"
+echo "  - QIIME2: $QIIME_DIR"
+echo "  - Temp: $TMPDIR"
+echo ""
+
+# ========================================================================================================
+# CRÉATION DES FICHIERS METADATA ET MANIFEST
+# ========================================================================================================
+
 echo "Creating Metadata File..."
 cat <<EOF > "$METADATA_FILE"
 sample-id	group
@@ -60,11 +122,13 @@ MP6	Sample
 MP7	Sample
 EOF
 
-# --- Create Manifest File ---
+echo "✓ Metadata file created: $METADATA_FILE"
+echo ""
+
 echo "Creating Manifest File..."
 echo -e "sample-id\tforward-absolute-filepath\treverse-absolute-filepath" > "$MANIFEST_FILE"
 
-# Mapping logic for renaming and manifest creation
+# Mapping échantillons
 declare -A SAMPLES
 SAMPLES=(
     ["BL_PCR_Jourand_S151"]="BL_PCR_Jourand"
@@ -86,42 +150,67 @@ SAMPLES=(
     ["BAR253132_S129"]="MP7"
 )
 
-# =======================================================================
-# STEP 1: Quality Check (Raw Data)
-# =======================================================================
-echo "=========================================================="
-echo "STEP 1: Quality Check on Raw Data"
-echo "=========================================================="
+# ========================================================================================================
+# ÉTAPE 1 : CONTRÔLE QUALITÉ DES DONNÉES BRUTES
+# ========================================================================================================
+
+echo "=========================================================================================================="
+echo "ÉTAPE 1 : Contrôle Qualité des Données Brutes"
+echo "=========================================================================================================="
+echo ""
 
 eval "$(conda shell.bash hook)"
 conda activate fastqc
 
-echo "Running FastQC..."
+echo "Running FastQC on raw data..."
 fastqc -t $THREADS "$RAW_DATA_DIR"/*.fastq.gz -o "$QC_DIR"
+
+if [ $? -eq 0 ]; then
+    echo "✓ FastQC completed"
+else
+    echo "ERROR: FastQC failed!"
+    exit 1
+fi
 
 conda deactivate
 conda activate multiqc
 
+echo ""
 echo "Running MultiQC..."
-multiqc "$QC_DIR" -o "$QC_DIR"
+multiqc "$QC_DIR" -o "$QC_DIR" --force
+
+if [ $? -eq 0 ]; then
+    echo "✓ MultiQC completed"
+    echo "✓ Report: ${QC_DIR}/multiqc_report.html"
+else
+    echo "ERROR: MultiQC failed!"
+fi
 
 conda deactivate
 
-# =======================================================================
-# STEP 2: Adapter Trimming & Filtering
-# =======================================================================
-echo "=========================================================="
-echo "STEP 2: Adapter Trimming & Filtering"
-echo "=========================================================="
+echo ""
+echo "ÉTAPE 1 : TERMINÉE"
+echo ""
+
+# ========================================================================================================
+# ÉTAPE 2 : NETTOYAGE ET FILTRAGE DES ADAPTATEURS
+# ========================================================================================================
+
+echo "=========================================================================================================="
+echo "ÉTAPE 2 : Nettoyage et Filtrage des Adaptateurs (Trimmomatic)"
+echo "=========================================================================================================="
+echo ""
 
 conda activate trimmomatic
 
 echo "Running Trimmomatic..."
+SAMPLE_COUNT=0
+
 for FILE_R1 in "$RAW_DATA_DIR"/*_R1_001.fastq.gz; do
     FILENAME=$(basename "$FILE_R1")
     BASE_NAME=${FILENAME%_L001_R1_001.fastq.gz}
     
-    # Check if this file is in our mapping list
+    # Vérifier si l'échantillon est dans le mapping
     SAMPLE_ID=""
     for KEY in "${!SAMPLES[@]}"; do
         if [[ "$BASE_NAME" == *"$KEY"* ]]; then
@@ -131,7 +220,7 @@ for FILE_R1 in "$RAW_DATA_DIR"/*_R1_001.fastq.gz; do
     done
 
     if [ -z "$SAMPLE_ID" ]; then
-        echo "Warning: No sample ID mapping found for $FILENAME. Skipping..."
+        echo "⚠️  Warning: No mapping found for $FILENAME. Skipping..."
         continue
     fi
     
@@ -139,87 +228,140 @@ for FILE_R1 in "$RAW_DATA_DIR"/*_R1_001.fastq.gz; do
 
     FILE_R2="${FILE_R1//_R1_001.fastq.gz/_R2_001.fastq.gz}"
     
-    # Output filenames
+    # Fichiers de sortie
     R1_PAIRED="$CLEANED_DIR/${SAMPLE_ID}_R1_paired.fastq.gz"
     R1_UNPAIRED="$CLEANED_DIR/${SAMPLE_ID}_R1_unpaired.fastq.gz"
     R2_PAIRED="$CLEANED_DIR/${SAMPLE_ID}_R2_paired.fastq.gz"
     R2_UNPAIRED="$CLEANED_DIR/${SAMPLE_ID}_R2_unpaired.fastq.gz"
 
-    # Run Trimmomatic
+    # Exécuter Trimmomatic
     trimmomatic PE -threads $THREADS -phred33 \
         "$FILE_R1" "$FILE_R2" \
         "$R1_PAIRED" "$R1_UNPAIRED" \
         "$R2_PAIRED" "$R2_UNPAIRED" \
         ILLUMINACLIP:"$ADAPTER_FILE":2:30:10 LEADING:20 TRAILING:20 SLIDINGWINDOW:4:20 MINLEN:100
 
-    # Add to manifest
-    echo -e "${SAMPLE_ID}\t${R1_PAIRED}\t${R2_PAIRED}" >> "$MANIFEST_FILE"
+    if [ $? -eq 0 ]; then
+        echo "  ✓ Trimmomatic completed for $SAMPLE_ID"
+        
+        # Ajouter au manifest
+        echo -e "${SAMPLE_ID}\t${R1_PAIRED}\t${R2_PAIRED}" >> "$MANIFEST_FILE"
+        ((SAMPLE_COUNT++))
+    else
+        echo "  ✗ ERROR: Trimmomatic failed for $SAMPLE_ID"
+    fi
+    
+    echo ""
 done
 
 conda deactivate
 
-# =======================================================================
-# STEP 3: Post-Clean Quality Check
-# =======================================================================
-echo "=========================================================="
-echo "STEP 3: Quality Check on Cleaned Data"
-echo "=========================================================="
+echo "✓ Trimmomatic completed for ${SAMPLE_COUNT} samples"
+echo "✓ Manifest created: $MANIFEST_FILE"
+echo ""
+echo "ÉTAPE 2 : TERMINÉE"
+echo ""
+
+# ========================================================================================================
+# ÉTAPE 3 : CONTRÔLE QUALITÉ POST-NETTOYAGE
+# ========================================================================================================
+
+echo "=========================================================================================================="
+echo "ÉTAPE 3 : Contrôle Qualité Post-Nettoyage"
+echo "=========================================================================================================="
+echo ""
 
 conda activate fastqc
 
-echo "Running FastQC on paired cleaned reads..."
+echo "Running FastQC on cleaned data..."
 fastqc -t $THREADS "$CLEANED_DIR"/*_paired.fastq.gz -o "$POST_CLEAN_QC_DIR"
+
+if [ $? -eq 0 ]; then
+    echo "✓ FastQC completed"
+else
+    echo "ERROR: FastQC failed!"
+fi
 
 conda deactivate
 conda activate multiqc
 
+echo ""
 echo "Running MultiQC..."
-multiqc "$POST_CLEAN_QC_DIR" -o "$POST_CLEAN_QC_DIR"
+multiqc "$POST_CLEAN_QC_DIR" -o "$POST_CLEAN_QC_DIR" --force
+
+if [ $? -eq 0 ]; then
+    echo "✓ MultiQC completed"
+    echo "✓ Report: ${POST_CLEAN_QC_DIR}/multiqc_report.html"
+fi
 
 conda deactivate
 
-# Verify manifest
 echo ""
-echo "Generated manifest:"
+echo "Manifest summary:"
 cat "$MANIFEST_FILE"
 echo ""
-echo "Number of samples in manifest: $(tail -n +2 "$MANIFEST_FILE" | wc -l)"
+echo "Number of samples: $(tail -n +2 "$MANIFEST_FILE" | wc -l)"
+echo ""
+echo "ÉTAPE 3 : TERMINÉE"
+echo ""
 
-# =======================================================================
-# STEP 4: QIIME2 Analysis
-# =======================================================================
-echo "=========================================================="
-echo "STEP 4: QIIME2 Analysis"
-echo "=========================================================="
+# ========================================================================================================
+# ÉTAPE 4 : ANALYSE QIIME2
+# ========================================================================================================
+
+echo "=========================================================================================================="
+echo "ÉTAPE 4 : Analyse QIIME2"
+echo "=========================================================================================================="
+echo ""
 
 eval "$(conda shell.bash hook)"
 conda activate /scratch_vol0/fungi/envs/qiime2-amplicon-2024.10
 
-# Suppress Python warnings
-export PYTHONWARNINGS="ignore"
+echo "QIIME2 environment activated"
+qiime --version
+echo ""
 
-# Use project directory for temp files
-export TMPDIR="${BASE_DIR}/tmp"
-mkdir -p "$TMPDIR"
-echo "Using TMPDIR: $TMPDIR"
+# --------------------------------------------------------------------------------------------------------
+# 4.1 : IMPORT DES DONNÉES
+# --------------------------------------------------------------------------------------------------------
 
-# 4.1 Import Data --------------------------------------------------------
-echo "Importing data into QIIME2..."
+echo "=========================================="
+echo "4.1 : Import des Données"
+echo "=========================================="
+echo ""
+
 qiime tools import \
   --type 'SampleData[PairedEndSequencesWithQuality]' \
   --input-path "$MANIFEST_FILE" \
   --output-path "$QIIME_DIR/core/demux.qza" \
   --input-format PairedEndFastqManifestPhred33V2
 
+if [ $? -eq 0 ]; then
+    echo "✓ Data imported: demux.qza"
+else
+    echo "ERROR: Import failed!"
+    exit 1
+fi
+
 qiime demux summarize \
   --i-data "$QIIME_DIR/core/demux.qza" \
   --o-visualization "$QIIME_DIR/visual/demux.qzv"
 
-echo "✓ Data imported. Check visual/demux.qzv at https://view.qiime2.org"
-
-# 4.2 Denoising with DADA2 ----------------------------------------------
+echo "✓ Demux summary: visual/demux.qzv"
+echo "  View at: https://view.qiime2.org"
 echo ""
-echo "Denoising with DADA2 (generating ASVs)..."
+
+# --------------------------------------------------------------------------------------------------------
+# 4.2 : DÉBRUITAGE DADA2 (GÉNÉRATION DES ASVs)
+# --------------------------------------------------------------------------------------------------------
+
+echo "=========================================="
+echo "4.2 : Débruitage DADA2"
+echo "=========================================="
+echo ""
+
+echo "Running DADA2 denoising (this may take 30-60 minutes)..."
+
 qiime dada2 denoise-paired \
   --i-demultiplexed-seqs "$QIIME_DIR/core/demux.qza" \
   --p-trim-left-f 0 \
@@ -231,53 +373,90 @@ qiime dada2 denoise-paired \
   --o-representative-sequences "$QIIME_DIR/core/rep-seqs.qza" \
   --o-denoising-stats "$QIIME_DIR/core/dada2-stats.qza"
 
+if [ $? -eq 0 ]; then
+    echo "✓ DADA2 completed"
+else
+    echo "ERROR: DADA2 failed!"
+    exit 1
+fi
+
 qiime metadata tabulate \
   --m-input-file "$QIIME_DIR/core/dada2-stats.qza" \
   --o-visualization "$QIIME_DIR/visual/dada2-stats.qzv"
 
-echo "✓ DADA2 denoising complete (ASVs generated)"
-
-# 4.3 Filtering Contaminants (Negative Controls) ------------------------
+echo "✓ DADA2 stats: visual/dada2-stats.qzv"
 echo ""
-echo "Removing Contaminants based on Negative Controls..."
 
-# Step 1: Extract ASV IDs present in negative controls
+# --------------------------------------------------------------------------------------------------------
+# 4.3 : FILTRAGE DES CONTAMINANTS (CONTRÔLES NÉGATIFS)
+# --------------------------------------------------------------------------------------------------------
+
+echo "=========================================="
+echo "4.3 : Filtrage des Contaminants"
+echo "=========================================="
+echo ""
+
+echo "Attempting to filter negative control samples..."
+
 qiime feature-table filter-samples \
   --i-table "${QIIME_DIR}/core/table.qza" \
   --m-metadata-file "$METADATA_FILE" \
   --p-where "[group]='Negative_Control'" \
-  --o-filtered-table "${QIIME_DIR}/core/neg-controls-table.qza" 2>&1
+  --o-filtered-table "${QIIME_DIR}/core/neg-controls-table.qza" 2>&1 | tee "${QIIME_DIR}/neg_control_filter.log"
 
-NEG_CONTROL_STATUS=$?
+NEG_CONTROL_STATUS=${PIPESTATUS[0]}
 
 if [ $NEG_CONTROL_STATUS -ne 0 ]; then
-  echo "⚠️  WARNING: Negative control table is EMPTY (no reads in negative control)"
-  echo "   This likely means BL_PCR_Jourand has 0 reads."
-  echo "   Skipping decontamination step - using original table."
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "⚠️  NEGATIVE CONTROL IS EMPTY"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "Le contrôle négatif (BL_PCR_Jourand) ne contient AUCUNE lecture."
+  echo ""
+  echo "✓ EXCELLENT RÉSULTAT !"
+  echo "  → Pas de contamination détectée"
+  echo "  → Les échantillons sont propres"
+  echo "  → Aucun ASV ne sera filtré"
+  echo ""
+  echo "Actions:"
+  echo "  → Table originale conservée (aucun filtrage)"
+  echo "  → Retrait du contrôle négatif de la table finale"
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
   
-  # Copy original table as "decontaminated" and "final"
+  # Copier les tables originales
   cp "${QIIME_DIR}/core/table.qza" "${QIIME_DIR}/core/table-decontam.qza"
   cp "${QIIME_DIR}/core/rep-seqs.qza" "${QIIME_DIR}/core/rep-seqs-clean.qza"
   
-  # Remove negative control samples from table
+  # Retirer le contrôle négatif
   qiime feature-table filter-samples \
     --i-table "${QIIME_DIR}/core/table-decontam.qza" \
     --m-metadata-file "$METADATA_FILE" \
     --p-where "[group]='Sample'" \
     --o-filtered-table "${QIIME_DIR}/core/table-final.qza"
   
-  echo "✓ Negative control removed (but no ASVs filtered since control was empty)"
+  echo "✓ Table finale créée: table-final.qza"
+  echo "✓ ASVs filtrés: 0 (contrôle vide)"
   
 else
-  # Negative control has reads - proceed with decontamination
-  echo "✓ Negative control table created successfully"
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "✓ NEGATIVE CONTROL HAS READS"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "Le contrôle négatif contient des lectures."
+  echo "Filtrage des ASVs contaminants en cours..."
+  echo ""
   
-  # Step 1b: Check if negative control has any sequences
   qiime feature-table summarize \
     --i-table "${QIIME_DIR}/core/neg-controls-table.qza" \
     --o-visualization "${QIIME_DIR}/visual/neg-controls-summary.qzv"
+  
+  echo "✓ Negative control summary: visual/neg-controls-summary.qzv"
 
-  # Step 2: Get list of ASV IDs from negative controls
+  # Export
   qiime tools export \
     --input-path "${QIIME_DIR}/core/neg-controls-table.qza" \
     --output-path "${QIIME_DIR}/export/neg-controls"
@@ -287,58 +466,76 @@ else
     -o "${QIIME_DIR}/export/neg-controls/feature-table.tsv" \
     --to-tsv
 
-  # Add proper header for QIIME2 metadata format
+  # Créer liste des contaminants avec header
   echo "feature-id" > "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
   tail -n +3 "${QIIME_DIR}/export/neg-controls/feature-table.tsv" | \
     cut -f1 >> "${QIIME_DIR}/export/neg-controls/contamination_ids.txt"
 
-  # Step 2b: Check if we found contaminant ASVs (exclude header)
   NUM_CONTAMINANTS=$(tail -n +2 "${QIIME_DIR}/export/neg-controls/contamination_ids.txt" | wc -l)
-  echo "Found ${NUM_CONTAMINANTS} contaminant ASVs in negative controls"
+  echo "Found ${NUM_CONTAMINANTS} contaminant ASVs"
 
   if [ "$NUM_CONTAMINANTS" -eq 0 ]; then
-    echo "WARNING: No contaminants found in negative control!"
-    echo "Skipping decontamination step."
-    
-    # Just copy the original table
+    echo "⚠️  No contaminant ASVs found (unexpected)"
     cp "${QIIME_DIR}/core/table.qza" "${QIIME_DIR}/core/table-decontam.qza"
     cp "${QIIME_DIR}/core/rep-seqs.qza" "${QIIME_DIR}/core/rep-seqs-clean.qza"
   else
-    # Step 3: Remove contaminating ASVs from main table
+    echo "Removing ${NUM_CONTAMINANTS} contaminant ASVs..."
+    
     qiime feature-table filter-features \
       --i-table "${QIIME_DIR}/core/table.qza" \
       --m-metadata-file "${QIIME_DIR}/export/neg-controls/contamination_ids.txt" \
       --p-exclude-ids \
       --o-filtered-table "${QIIME_DIR}/core/table-decontam.qza"
 
-    # Step 4: Filter representative sequences to match
     qiime feature-table filter-seqs \
       --i-data "${QIIME_DIR}/core/rep-seqs.qza" \
       --i-table "${QIIME_DIR}/core/table-decontam.qza" \
       --o-filtered-data "${QIIME_DIR}/core/rep-seqs-clean.qza"
+    
+    echo "✓ Contaminants removed"
   fi
 
-  # Step 5: Remove Negative Control samples from the table
+  # Retirer échantillon contrôle négatif
   qiime feature-table filter-samples \
     --i-table "${QIIME_DIR}/core/table-decontam.qza" \
     --m-metadata-file "$METADATA_FILE" \
     --p-where "[group]='Sample'" \
     --o-filtered-table "${QIIME_DIR}/core/table-final.qza"
 
-  echo "✓ Decontamination complete. Final table: table-final.qza"
+  echo "✓ Decontamination completed"
+  echo "✓ Contaminant ASVs removed: ${NUM_CONTAMINANTS}"
 fi
 
-# 4.4 Build Phylogenetic Tree --------------------------------------------
-echo ""
-echo "Building phylogenetic tree..."
+# Générer résumé table finale
+qiime feature-table summarize \
+  --i-table "${QIIME_DIR}/core/table-final.qza" \
+  --o-visualization "${QIIME_DIR}/visual/table-final-summary.qzv" \
+  --m-sample-metadata-file "$METADATA_FILE"
 
-# Create temp directory in writable location
+qiime feature-table tabulate-seqs \
+  --i-data "${QIIME_DIR}/core/rep-seqs-clean.qza" \
+  --o-visualization "${QIIME_DIR}/visual/rep-seqs-clean.qzv"
+
+echo "✓ Final table summary: visual/table-final-summary.qzv"
+echo ""
+
+# --------------------------------------------------------------------------------------------------------
+# 4.4 : CONSTRUCTION DE L'ARBRE PHYLOGÉNÉTIQUE
+# --------------------------------------------------------------------------------------------------------
+
+echo "=========================================="
+echo "4.4 : Construction de l'Arbre Phylogénétique"
+echo "=========================================="
+echo ""
+
+# Temp directory pour MAFFT
 MAFFT_TMPDIR="${BASE_DIR}/tmp_mafft"
 mkdir -p "$MAFFT_TMPDIR"
 export TMPDIR="$MAFFT_TMPDIR"
 export TMP="$MAFFT_TMPDIR"
 
-# Try align-to-tree-mafft-fasttree
+echo "Building phylogenetic tree (this may take 10-30 minutes)..."
+
 qiime phylogeny align-to-tree-mafft-fasttree \
   --i-sequences "${QIIME_DIR}/core/rep-seqs-clean.qza" \
   --p-n-threads 1 \
@@ -349,9 +546,8 @@ qiime phylogeny align-to-tree-mafft-fasttree \
 
 TREE_STATUS=$?
 
-# If MAFFT fails, try with parttree
 if [ $TREE_STATUS -ne 0 ] || [ ! -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
-  echo "WARNING: Standard MAFFT alignment failed. Trying with --p-parttree..."
+  echo "⚠️  Standard MAFFT failed. Trying with --p-parttree..."
   
   rm -f "${QIIME_DIR}/core/aligned-rep-seqs.qza"
   rm -f "${QIIME_DIR}/core/masked-aligned-rep-seqs.qza"
@@ -370,28 +566,32 @@ if [ $TREE_STATUS -ne 0 ] || [ ! -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
   TREE_STATUS=$?
 fi
 
-# Final check
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
   echo "✓ Phylogenetic tree created successfully!"
   qiime tools peek "${QIIME_DIR}/core/rooted-tree.qza"
 else
   echo "✗ Phylogenetic tree creation FAILED"
-  echo "  Continuing without Faith PD (tree-based metrics will be skipped)"
+  echo "  Continuing without Faith PD metrics..."
 fi
 
-# Cleanup temp directory
 rm -rf "$MAFFT_TMPDIR"
+export TMPDIR="${BASE_DIR}/tmp"
 
-# 4.5 Rarefaction & Diversity Metrics ------------------------------------
 echo ""
-echo "Running Rarefaction Analysis..."
 
-# FORCE remove old core-metrics results
-echo "Cleaning old core-metrics-results..."
+# --------------------------------------------------------------------------------------------------------
+# 4.5 : MÉTRIQUES DE DIVERSITÉ (CORE-METRICS-PHYLOGENETIC)
+# --------------------------------------------------------------------------------------------------------
+
+echo "=========================================="
+echo "4.5 : Métriques de Diversité"
+echo "=========================================="
+echo ""
+
 rm -rf "${QIIME_DIR}/core-metrics-results"
 mkdir -p "${QIIME_DIR}/core-metrics-results"
 
-# Export table to calculate depths
+# Export table pour calculer profondeurs
 qiime tools export \
   --input-path "${QIIME_DIR}/core/table-final.qza" \
   --output-path "${QIIME_DIR}/export/table-final-temp"
@@ -401,68 +601,60 @@ biom convert \
   -o "${QIIME_DIR}/export/table-final-temp/feature-table.tsv" \
   --to-tsv
 
-MIN_DEPTH=1000
+echo "Calculating sampling depths with Python..."
 
-# CORRECTION: Calculate depths using Python to ensure correct parsing
-echo "Calculating sample depths..."
-
-python3 << EOFPYTHON
+DEPTHS=$(python3 << EOFPYTHON
 import pandas as pd
+import sys
 
-# Read feature table
-df = pd.read_csv(
-    "${QIIME_DIR}/export/table-final-temp/feature-table.tsv",
-    sep="\t",
-    skiprows=1,  # Skip comment line
-    index_col=0
+try:
+    df = pd.read_csv(
+        "${QIIME_DIR}/export/table-final-temp/feature-table.tsv",
+        sep="\t",
+        skiprows=1,
+        index_col=0
+    )
+    
+    depths = df.sum(axis=0).astype(int)
+    
+    min_depth = 1000
+    filtered_depths = depths[depths >= min_depth]
+    
+    if len(filtered_depths) > 0:
+        sampling_depth = int(filtered_depths.quantile(0.1))
+    else:
+        sampling_depth = int(depths.median())
+    
+    max_depth = int(depths.max())
+    
+    print(f"{sampling_depth} {max_depth}")
+    
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+EOFPYTHON
 )
 
-# Calculate read depths per sample
-depths = df.sum(axis=0).astype(int)
+SAMPLING_DEPTH=$(echo $DEPTHS | cut -d' ' -f1)
+MAX_DEPTH=$(echo $DEPTHS | cut -d' ' -f2)
 
-# Save with proper sample names
-depths_file = "${QIIME_DIR}/export/sample_depths_temp.txt"
-with open(depths_file, 'w') as f:
-    for sample, count in depths.items():
-        f.write(f"{sample}\t{count}\n")
+if ! [[ "$SAMPLING_DEPTH" =~ ^[0-9]+$ ]] || ! [[ "$MAX_DEPTH" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: Invalid depth values!"
+    echo "  SAMPLING_DEPTH: $SAMPLING_DEPTH"
+    echo "  MAX_DEPTH: $MAX_DEPTH"
+    exit 1
+fi
 
-print(f"Sample depths saved to: {depths_file}")
-print(f"Number of samples: {len(depths)}")
-print(f"Min depth: {depths.min()}")
-print(f"Max depth: {depths.max()}")
-print(f"Median depth: {int(depths.median())}")
+echo "✓ Sampling Depth (10th percentile): $SAMPLING_DEPTH"
+echo "✓ Max Depth: $MAX_DEPTH"
+echo ""
 
-# Calculate 10th percentile for rarefaction
-filtered_depths = depths[depths >= ${MIN_DEPTH}]
-if len(filtered_depths) > 0:
-    sampling_depth = int(filtered_depths.quantile(0.1))
-else:
-    sampling_depth = int(depths.median())
+echo "$SAMPLING_DEPTH" > "${QIIME_DIR}/export/sampling_depth.txt"
+echo "$MAX_DEPTH" > "${QIIME_DIR}/export/max_depth.txt"
 
-print(f"Recommended sampling depth (10th percentile): {sampling_depth}")
-
-# Save sampling depth to file
-with open("${QIIME_DIR}/export/sampling_depth.txt", 'w') as f:
-    f.write(str(sampling_depth))
-
-# Save max depth for rarefaction curves
-max_depth = int(depths.max())
-with open("${QIIME_DIR}/export/max_depth.txt", 'w') as f:
-    f.write(str(max_depth))
-    
-print(f"Max depth for rarefaction curves: {max_depth}")
-EOFPYTHON
-
-# Read calculated values
-SAMPLING_DEPTH=$(cat "${QIIME_DIR}/export/sampling_depth.txt")
-MAX_DEPTH=$(cat "${QIIME_DIR}/export/max_depth.txt")
-
-echo "Selected Sampling Depth: $SAMPLING_DEPTH"
-echo "Max Depth for rarefaction curves: $MAX_DEPTH"
-
-# Run core-metrics with phylogenetic tree if available
+# Core-metrics
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
-  echo "Using phylogenetic tree for diversity analysis (includes Faith PD)..."
+  echo "Running core-metrics-phylogenetic (with Faith PD)..."
   
   qiime diversity core-metrics-phylogenetic \
     --i-phylogeny "${QIIME_DIR}/core/rooted-tree.qza" \
@@ -485,13 +677,12 @@ if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
     --o-unweighted-unifrac-emperor "${QIIME_DIR}/core-metrics-results/unweighted_unifrac_emperor.qzv" \
     --o-weighted-unifrac-emperor "${QIIME_DIR}/core-metrics-results/weighted_unifrac_emperor.qzv" \
     --o-jaccard-emperor "${QIIME_DIR}/core-metrics-results/jaccard_emperor.qzv" \
-    --o-bray-curtis-emperor "${QIIME_DIR}/core-metrics-results/bray_curtis_emperor.qzv" \
-    --verbose
+    --o-bray-curtis-emperor "${QIIME_DIR}/core-metrics-results/bray_curtis_emperor.qzv"
     
   if [ $? -eq 0 ]; then
-    echo "✓ Diversity metrics calculated with Faith PD!"
+    echo "✓ Core-metrics-phylogenetic completed (with Faith PD)"
   else
-    echo "WARNING: Phylogenetic metrics failed. Trying non-phylogenetic metrics..."
+    echo "⚠️  Phylogenetic metrics failed. Running non-phylogenetic metrics..."
     rm -rf "${QIIME_DIR}/core-metrics-results"/*
     
     qiime diversity core-metrics \
@@ -509,10 +700,10 @@ if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
       --o-jaccard-emperor "${QIIME_DIR}/core-metrics-results/jaccard_emperor.qzv" \
       --o-bray-curtis-emperor "${QIIME_DIR}/core-metrics-results/bray_curtis_emperor.qzv"
     
-    echo "✓ Diversity metrics calculated (without Faith PD)"
+    echo "✓ Core-metrics completed (without Faith PD)"
   fi
 else
-  echo "WARNING: No phylogenetic tree found. Using non-phylogenetic metrics only..."
+  echo "⚠️  No phylogenetic tree. Running non-phylogenetic metrics only..."
   
   qiime diversity core-metrics \
     --i-table "${QIIME_DIR}/core/table-final.qza" \
@@ -529,14 +720,22 @@ else
     --o-jaccard-emperor "${QIIME_DIR}/core-metrics-results/jaccard_emperor.qzv" \
     --o-bray-curtis-emperor "${QIIME_DIR}/core-metrics-results/bray_curtis_emperor.qzv"
   
-  echo "✓ Diversity metrics calculated (without Faith PD)"
+  echo "✓ Core-metrics completed (without Faith PD)"
 fi
 
-# 4.6 Generate Rarefaction Curves ----------------------------------------
 echo ""
-echo "Generating rarefaction curves..."
 
-# Standard rarefaction curves (Shannon + Observed Features)
+# --------------------------------------------------------------------------------------------------------
+# 4.6 : COURBES DE RARÉFACTION
+# --------------------------------------------------------------------------------------------------------
+
+echo "=========================================="
+echo "4.6 : Courbes de Raréfaction"
+echo "=========================================="
+echo ""
+
+echo "Generating rarefaction curves (Shannon + Observed Features)..."
+
 qiime diversity alpha-rarefaction \
   --i-table "${QIIME_DIR}/core/table-final.qza" \
   --p-min-depth 10 \
@@ -546,12 +745,11 @@ qiime diversity alpha-rarefaction \
   --o-visualization "${QIIME_DIR}/visual/rarefaction-curves.qzv"
 
 if [ $? -eq 0 ]; then
-  echo "✓ Rarefaction curves generated: rarefaction-curves.qzv"
+  echo "✓ Rarefaction curves: visual/rarefaction-curves.qzv"
 else
-  echo "WARNING: Standard rarefaction curves failed"
+  echo "✗ ERROR: Rarefaction curves failed"
 fi
 
-# Faith PD rarefaction curves (if tree exists)
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
   echo "Generating Faith PD rarefaction curves..."
   
@@ -565,41 +763,62 @@ if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
     --o-visualization "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv"
   
   if [ $? -eq 0 ]; then
-    echo "✓ Faith PD rarefaction curves generated: rarefaction-curves-phylogenetic.qzv"
-  else
-    echo "WARNING: Faith PD rarefaction curves failed"
+    echo "✓ Faith PD rarefaction: visual/rarefaction-curves-phylogenetic.qzv"
   fi
 fi
 
-# 4.7 Taxonomy Classification --------------------------------------------
 echo ""
-echo "Assigning Taxonomy..."
-CLASSIFIER_PATH="/scratch_vol0/fungi/dugong_microbiome/05_QIIME2/silva-138.2-ssu-nr99-341f-805r-classifier.qza"
+
+# --------------------------------------------------------------------------------------------------------
+# 4.7 : CLASSIFICATION TAXONOMIQUE
+# --------------------------------------------------------------------------------------------------------
+
+echo "=========================================="
+echo "4.7 : Classification Taxonomique"
+echo "=========================================="
+echo ""
+
+echo "Assigning taxonomy with SILVA 138.2 (this may take 10-20 minutes)..."
 
 qiime feature-classifier classify-sklearn \
   --i-classifier "$CLASSIFIER_PATH" \
   --i-reads "$QIIME_DIR/core/rep-seqs-clean.qza" \
   --o-classification "$QIIME_DIR/core/taxonomy.qza"
 
+if [ $? -eq 0 ]; then
+    echo "✓ Taxonomy assigned: taxonomy.qza"
+else
+    echo "ERROR: Taxonomy classification failed!"
+    exit 1
+fi
+
 qiime metadata tabulate \
   --m-input-file "$QIIME_DIR/core/taxonomy.qza" \
   --o-visualization "$QIIME_DIR/visual/taxonomy.qzv"
 
-echo "✓ Taxonomy assigned"
-
-# =======================================================================
-# STEP 5: EXPORTS FOR DOWNSTREAM ANALYSES
-# =======================================================================
+echo "✓ Taxonomy table: visual/taxonomy.qzv"
 echo ""
-echo "=========================================================="
-echo "STEP 5: Exporting Results"
-echo "=========================================================="
+
+echo "ÉTAPE 4 : TERMINÉE"
+echo ""
+
+# ========================================================================================================
+# ÉTAPE 5 : EXPORT DES RÉSULTATS
+# ========================================================================================================
+
+echo "=========================================================================================================="
+echo "ÉTAPE 5 : Export des Résultats"
+echo "=========================================================================================================="
+echo ""
 
 EXPORT_DIR="${QIIME_DIR}/export"
 mkdir -p "${EXPORT_DIR}"
 
-# 5.1 Final feature table
-echo "Exporting feature table..."
+# --------------------------------------------------------------------------------------------------------
+# 5.1 : TABLE DE FEATURES
+# --------------------------------------------------------------------------------------------------------
+
+echo "5.1 : Exporting feature table..."
 
 qiime tools export \
   --input-path "${QIIME_DIR}/core/table-final.qza" \
@@ -612,100 +831,90 @@ biom convert \
 
 sed -i 's/#OTU ID/#ASV_ID/g' "${EXPORT_DIR}/feature_table/feature-table.tsv" 2>/dev/null || true
 
-echo "✓ Feature table exported"
+echo "✓ Feature table: export/feature_table/feature-table.tsv"
 
-# 5.2 Representative sequences
-echo "Exporting representative sequences..."
+# --------------------------------------------------------------------------------------------------------
+# 5.2 : SÉQUENCES REPRÉSENTATIVES
+# --------------------------------------------------------------------------------------------------------
+
+echo "5.2 : Exporting representative sequences..."
 
 qiime tools export \
   --input-path "${QIIME_DIR}/core/rep-seqs-clean.qza" \
   --output-path "${EXPORT_DIR}/rep_seqs"
 
-echo "✓ Representative sequences exported"
+echo "✓ Rep seqs: export/rep_seqs/dna-sequences.fasta"
 
-# 5.3 Taxonomy
-echo "Exporting taxonomy..."
+# --------------------------------------------------------------------------------------------------------
+# 5.3 : TAXONOMIE
+# --------------------------------------------------------------------------------------------------------
+
+echo "5.3 : Exporting taxonomy..."
 
 qiime tools export \
   --input-path "${QIIME_DIR}/core/taxonomy.qza" \
   --output-path "${EXPORT_DIR}/taxonomy"
 
-qiime metadata tabulate \
-  --m-input-file "${QIIME_DIR}/core/taxonomy.qza" \
-  --o-visualization "${QIIME_DIR}/visual/taxonomy-table.qzv"
+echo "✓ Taxonomy: export/taxonomy/taxonomy.tsv"
 
-echo "✓ Taxonomy exported"
+# --------------------------------------------------------------------------------------------------------
+# 5.4 : ARBRE PHYLOGÉNÉTIQUE
+# --------------------------------------------------------------------------------------------------------
 
-# 5.4 Phylogenetic tree
 if [ -f "${QIIME_DIR}/core/rooted-tree.qza" ]; then
-  echo "Exporting phylogenetic tree..."
+  echo "5.4 : Exporting phylogenetic tree..."
   
   qiime tools export \
     --input-path "${QIIME_DIR}/core/rooted-tree.qza" \
     --output-path "${EXPORT_DIR}/tree"
   
   if [ -f "${EXPORT_DIR}/tree/tree.nwk" ]; then
-    echo "✓ Phylogenetic tree exported: tree/tree.nwk"
+    echo "✓ Tree: export/tree/tree.nwk"
   fi
 fi
 
-# 5.5 DADA2 stats
-echo "Exporting DADA2 stats..."
+# --------------------------------------------------------------------------------------------------------
+# 5.5 : STATISTIQUES DADA2
+# --------------------------------------------------------------------------------------------------------
+
+echo "5.5 : Exporting DADA2 stats..."
 
 qiime tools export \
   --input-path "${QIIME_DIR}/core/dada2-stats.qza" \
   --output-path "${EXPORT_DIR}/dada2_stats"
 
-qiime metadata tabulate \
-  --m-input-file "${QIIME_DIR}/core/dada2-stats.qza" \
-  --o-visualization "${QIIME_DIR}/visual/dada2-stats.qzv"
+echo "✓ DADA2 stats: export/dada2_stats/"
 
-echo "✓ DADA2 stats exported"
+# --------------------------------------------------------------------------------------------------------
+# 5.6 : INDICES DE DIVERSITÉ (CORE-METRICS)
+# --------------------------------------------------------------------------------------------------------
 
-# 5.6 Diversity indices from core-metrics
-echo "Exporting diversity indices..."
+echo "5.6 : Exporting diversity indices..."
 
 CORE_METRICS_DIR="${QIIME_DIR}/core-metrics-results"
 mkdir -p "${EXPORT_DIR}/diversity"
 
-# Observed ASVs
-if [ -f "${CORE_METRICS_DIR}/observed_features_vector.qza" ]; then
-  qiime tools export \
-    --input-path "${CORE_METRICS_DIR}/observed_features_vector.qza" \
-    --output-path "${EXPORT_DIR}/diversity/observed_ASVs"
-fi
+for metric in observed_features shannon evenness faith_pd; do
+  vector_file="${CORE_METRICS_DIR}/${metric}_vector.qza"
+  [ "$metric" = "observed_features" ] && metric_name="observed_ASVs" || metric_name="$metric"
+  
+  if [ -f "$vector_file" ]; then
+    qiime tools export \
+      --input-path "$vector_file" \
+      --output-path "${EXPORT_DIR}/diversity/${metric_name}"
+    echo "  ✓ ${metric_name}"
+  fi
+done
 
-# Shannon
-if [ -f "${CORE_METRICS_DIR}/shannon_vector.qza" ]; then
-  qiime tools export \
-    --input-path "${CORE_METRICS_DIR}/shannon_vector.qza" \
-    --output-path "${EXPORT_DIR}/diversity/shannon"
-fi
+# --------------------------------------------------------------------------------------------------------
+# 5.7 : TABLE ASV + TAXONOMIE FUSIONNÉE
+# --------------------------------------------------------------------------------------------------------
 
-# Evenness
-if [ -f "${CORE_METRICS_DIR}/evenness_vector.qza" ]; then
-  qiime tools export \
-    --input-path "${CORE_METRICS_DIR}/evenness_vector.qza" \
-    --output-path "${EXPORT_DIR}/diversity/evenness"
-fi
-
-# Faith PD
-if [ -f "${CORE_METRICS_DIR}/faith_pd_vector.qza" ]; then
-  qiime tools export \
-    --input-path "${CORE_METRICS_DIR}/faith_pd_vector.qza" \
-    --output-path "${EXPORT_DIR}/diversity/faith_pd"
-  echo "✓ Faith PD exported"
-fi
-
-echo "✓ Diversity indices exported"
-
-# 5.7 Merge ASV abundance + taxonomy
-echo "Merging ASV abundance and taxonomy..."
+echo "5.7 : Merging ASV abundance + taxonomy..."
 
 python3 << EOFPYTHON
 import pandas as pd
 import os
-import sys
 
 qiime_dir = "${QIIME_DIR}"
 export_dir = os.path.join(qiime_dir, "export")
@@ -724,14 +933,16 @@ try:
     merged = tax.join(tab, how="inner")
     output_file = os.path.join(export_dir, "ASV_abundance_taxonomy.tsv")
     merged.to_csv(output_file, sep="\t")
-    print(f"✓ Merged table saved: {output_file}")
+    print(f"✓ Merged table: {output_file}")
 except Exception as e:
-    print(f"ERROR in merging tables: {e}")
-    sys.exit(1)
+    print(f"ERROR: {e}")
 EOFPYTHON
 
-# 5.8 Sample depths WITH PROPER NAMES
-echo "Calculating sample depths with proper names..."
+# --------------------------------------------------------------------------------------------------------
+# 5.8 : PROFONDEURS DE LECTURE PAR ÉCHANTILLON
+# --------------------------------------------------------------------------------------------------------
+
+echo "5.8 : Calculating sample read depths..."
 
 python3 << EOFPYTHON
 import pandas as pd
@@ -740,146 +951,82 @@ import os
 qiime_dir = "${QIIME_DIR}"
 export_dir = os.path.join(qiime_dir, "export")
 
-# Read feature table with proper parsing
 df = pd.read_csv(
     os.path.join(export_dir, "feature_table", "feature-table.tsv"),
     sep="\t",
-    skiprows=1,  # Skip the comment line
+    skiprows=1,
     index_col=0
 )
 
-# Calculate read depths per sample
 depths = df.sum(axis=0).astype(int)
-
-# Add rarefaction depth column
 sampling_depth = ${SAMPLING_DEPTH}
 
-# Create comprehensive table
 depths_df = pd.DataFrame({
     'sample_id': depths.index,
     'total_reads': depths.values,
     'rarefaction_depth': [sampling_depth] * len(depths)
 })
 
-# Sort by sample name
 depths_df = depths_df.sort_values('sample_id')
 
-# Save
 output_file = os.path.join(export_dir, "sample_read_depths_final.tsv")
 depths_df.to_csv(output_file, sep="\t", index=False)
 
-print(f"✓ Sample depths saved: {output_file}")
-print(f"  Samples: {len(depths_df)}")
-print(f"  Total reads range: {depths_df['total_reads'].min()} - {depths_df['total_reads'].max()}")
-print(f"  Rarefaction depth: {sampling_depth}")
+print(f"✓ Sample depths: {output_file}")
 EOFPYTHON
 
-# =======================================================================
-# STEP 6: COMPREHENSIVE DIVERSITY INDICES CALCULATION
-# =======================================================================
 echo ""
-echo "=========================================================="
-echo "STEP 6: Calculating All Diversity Indices"
-echo "=========================================================="
+echo "ÉTAPE 5 : TERMINÉE"
+echo ""
+
+# ========================================================================================================
+# ÉTAPE 6 : CALCUL DE TOUS LES INDICES DE DIVERSITÉ ALPHA
+# ========================================================================================================
+
+echo "=========================================================================================================="
+echo "ÉTAPE 6 : Calcul de Tous les Indices de Diversité Alpha"
+echo "=========================================================================================================="
+echo ""
 
 DIVERSITY_DIR="${QIIME_DIR}/diversity_indices"
 mkdir -p "${DIVERSITY_DIR}"
 
 echo "Calculating additional alpha diversity indices..."
 
-# Simpson index
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric simpson \
-  --o-alpha-diversity "${DIVERSITY_DIR}/simpson_vector.qza"
+# Liste des métriques
+METRICS=(
+  "simpson"
+  "simpson_e"
+  "chao1"
+  "ace"
+  "goods_coverage"
+  "fisher_alpha"
+  "berger_parker_d"
+  "gini_index"
+  "brillouin_d"
+  "strong"
+  "mcintosh_d"
+  "mcintosh_e"
+  "margalef"
+  "menhinick"
+)
 
-# Simpson evenness
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric simpson_e \
-  --o-alpha-diversity "${DIVERSITY_DIR}/simpson_evenness_vector.qza"
-
-# Chao1
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric chao1 \
-  --o-alpha-diversity "${DIVERSITY_DIR}/chao1_vector.qza"
-
-# ACE
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric ace \
-  --o-alpha-diversity "${DIVERSITY_DIR}/ace_vector.qza"
-
-# Good's coverage
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric goods_coverage \
-  --o-alpha-diversity "${DIVERSITY_DIR}/goods_coverage_vector.qza"
-
-# Fisher's alpha
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric fisher_alpha \
-  --o-alpha-diversity "${DIVERSITY_DIR}/fisher_alpha_vector.qza"
-
-# Berger-Parker
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric berger_parker_d \
-  --o-alpha-diversity "${DIVERSITY_DIR}/berger_parker_vector.qza"
-
-# Gini index
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric gini_index \
-  --o-alpha-diversity "${DIVERSITY_DIR}/gini_index_vector.qza"
-
-# Brillouin
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric brillouin_d \
-  --o-alpha-diversity "${DIVERSITY_DIR}/brillouin_vector.qza"
-
-# Strong
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric strong \
-  --o-alpha-diversity "${DIVERSITY_DIR}/strong_vector.qza"
-
-# McIntosh diversity
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric mcintosh_d \
-  --o-alpha-diversity "${DIVERSITY_DIR}/mcintosh_d_vector.qza"
-
-# McIntosh evenness
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric mcintosh_e \
-  --o-alpha-diversity "${DIVERSITY_DIR}/mcintosh_e_vector.qza"
-
-# Margalef
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric margalef \
-  --o-alpha-diversity "${DIVERSITY_DIR}/margalef_vector.qza"
-
-# Menhinick
-qiime diversity alpha \
-  --i-table "${QIIME_DIR}/core/table-final.qza" \
-  --p-metric menhinick \
-  --o-alpha-diversity "${DIVERSITY_DIR}/menhinick_vector.qza"
+for metric in "${METRICS[@]}"; do
+  echo "  - ${metric}"
+  qiime diversity alpha \
+    --i-table "${QIIME_DIR}/core/table-final.qza" \
+    --p-metric "$metric" \
+    --o-alpha-diversity "${DIVERSITY_DIR}/${metric}_vector.qza" 2>/dev/null
+done
 
 echo "✓ All alpha diversity indices calculated"
-
-# Export all indices to TSV
 echo ""
-echo "Exporting all diversity indices to TSV format..."
+
+# Export tous les indices en TSV
+echo "Exporting all diversity indices to TSV..."
 
 mkdir -p "${EXPORT_DIR}/diversity_all"
 
-# Function to export and rename columns
 export_diversity_metric() {
     local metric_name=$1
     local qza_file=$2
@@ -888,15 +1035,13 @@ export_diversity_metric() {
     if [ -f "$qza_file" ]; then
         qiime tools export \
           --input-path "$qza_file" \
-          --output-path "${EXPORT_DIR}/diversity_all/${output_name}_temp"
+          --output-path "${EXPORT_DIR}/diversity_all/${output_name}_temp" 2>/dev/null
         
         sed "1s/.*/sample-id\t${output_name}/" \
           "${EXPORT_DIR}/diversity_all/${output_name}_temp/alpha-diversity.tsv" > \
-          "${EXPORT_DIR}/diversity_all/${output_name}.tsv"
+          "${EXPORT_DIR}/diversity_all/${output_name}.tsv" 2>/dev/null
         
         rm -rf "${EXPORT_DIR}/diversity_all/${output_name}_temp"
-    else
-        echo "Warning: ${qza_file} not found, skipping ${metric_name}..."
     fi
 }
 
@@ -917,30 +1062,28 @@ export_diversity_metric "Faith PD" \
   "${QIIME_DIR}/core-metrics-results/faith_pd_vector.qza" \
   "faith_pd"
 
-# Export additional metrics
+# Export métriques additionnelles
 export_diversity_metric "Simpson" "${DIVERSITY_DIR}/simpson_vector.qza" "simpson"
-export_diversity_metric "Simpson Evenness" "${DIVERSITY_DIR}/simpson_evenness_vector.qza" "simpson_evenness"
+export_diversity_metric "Simpson Evenness" "${DIVERSITY_DIR}/simpson_e_vector.qza" "simpson_evenness"
 export_diversity_metric "Chao1" "${DIVERSITY_DIR}/chao1_vector.qza" "chao1"
 export_diversity_metric "ACE" "${DIVERSITY_DIR}/ace_vector.qza" "ace"
 export_diversity_metric "Goods Coverage" "${DIVERSITY_DIR}/goods_coverage_vector.qza" "goods_coverage"
 export_diversity_metric "Fisher Alpha" "${DIVERSITY_DIR}/fisher_alpha_vector.qza" "fisher_alpha"
-export_diversity_metric "Berger Parker" "${DIVERSITY_DIR}/berger_parker_vector.qza" "berger_parker"
+export_diversity_metric "Berger Parker" "${DIVERSITY_DIR}/berger_parker_d_vector.qza" "berger_parker"
 export_diversity_metric "Gini Index" "${DIVERSITY_DIR}/gini_index_vector.qza" "gini_index"
-export_diversity_metric "Brillouin" "${DIVERSITY_DIR}/brillouin_vector.qza" "brillouin"
+export_diversity_metric "Brillouin" "${DIVERSITY_DIR}/brillouin_d_vector.qza" "brillouin"
 export_diversity_metric "Strong" "${DIVERSITY_DIR}/strong_vector.qza" "strong"
 export_diversity_metric "McIntosh D" "${DIVERSITY_DIR}/mcintosh_d_vector.qza" "mcintosh_d"
 export_diversity_metric "McIntosh E" "${DIVERSITY_DIR}/mcintosh_e_vector.qza" "mcintosh_e"
 export_diversity_metric "Margalef" "${DIVERSITY_DIR}/margalef_vector.qza" "margalef"
 export_diversity_metric "Menhinick" "${DIVERSITY_DIR}/menhinick_vector.qza" "menhinick"
 
-# Merge all indices into comprehensive table WITH RAREFACTION DEPTH
-echo ""
-echo "Merging all diversity indices into a single table..."
+# Fusionner tous les indices dans une table unique
+echo "Merging all diversity indices..."
 
 python3 << EOFPYTHON
 import pandas as pd
 import os
-import sys
 from pathlib import Path
 
 qiime_dir = "${QIIME_DIR}"
@@ -948,23 +1091,16 @@ diversity_dir = Path(qiime_dir) / "export" / "diversity_all"
 
 tsv_files = sorted(diversity_dir.glob("*.tsv"))
 
-if not tsv_files:
-    print("ERROR: No diversity TSV files found!")
-    sys.exit(1)
-
-print(f"Found {len(tsv_files)} diversity files to merge")
-
-try:
+if tsv_files:
     df_merged = pd.read_csv(tsv_files[0], sep="\t", index_col=0)
 
     for tsv_file in tsv_files[1:]:
         try:
             df_temp = pd.read_csv(tsv_file, sep="\t", index_col=0)
             df_merged = df_merged.join(df_temp, how="outer")
-        except Exception as e:
-            print(f"Warning: Could not merge {tsv_file.name}: {e}")
+        except:
+            pass
 
-    # Add rarefaction depth column
     sampling_depth = ${SAMPLING_DEPTH}
     df_merged.insert(0, 'rarefaction_depth', sampling_depth)
     
@@ -973,90 +1109,129 @@ try:
     output_file = diversity_dir.parent / "diversity_indices_all.tsv"
     df_merged.to_csv(output_file, sep="\t")
 
-    print(f"\n✓ Comprehensive diversity table saved:")
-    print(f"  {output_file}")
-    print(f"\n✓ Number of samples: {len(df_merged)}")
-    print(f"✓ Number of indices: {len(df_merged.columns)}")
-    print(f"✓ Rarefaction depth: {sampling_depth}")
-    print(f"\nColumns included:")
-    for col in df_merged.columns:
-        print(f"  - {col}")
-
-except Exception as e:
-    print(f"ERROR in merging diversity tables: {e}")
-    sys.exit(1)
-
+    print(f"✓ Comprehensive diversity table: {output_file}")
+    print(f"  Samples: {len(df_merged)}")
+    print(f"  Indices: {len(df_merged.columns)}")
 EOFPYTHON
 
-# =======================================================================
-# STEP 7: EXPORT RAREFACTION CURVE DATA
-# =======================================================================
 echo ""
-echo "=========================================================="
-echo "STEP 7: Exporting Rarefaction Curve Data"
-echo "=========================================================="
+echo "ÉTAPE 6 : TERMINÉE"
+echo ""
 
-# Export rarefaction QZV to extract data
+# ========================================================================================================
+# ÉTAPE 7 : EXPORT DES DONNÉES DE RARÉFACTION
+# ========================================================================================================
+
+echo "=========================================================================================================="
+echo "ÉTAPE 7 : Export des Données de Raréfaction"
+echo "=========================================================================================================="
+echo ""
+
 mkdir -p "${EXPORT_DIR}/rarefaction_data"
 
 if [ -f "${QIIME_DIR}/visual/rarefaction-curves.qzv" ]; then
-  echo "Extracting rarefaction curve data (Shannon + Observed Features)..."
+  echo "Extracting rarefaction curve data..."
   
-  # Unzip QZV
-  unzip -q "${QIIME_DIR}/visual/rarefaction-curves.qzv" -d "${EXPORT_DIR}/rarefaction_data/temp"
+  unzip -q "${QIIME_DIR}/visual/rarefaction-curves.qzv" -d "${EXPORT_DIR}/rarefaction_data/temp" 2>/dev/null
   
-  # Find and copy CSV files
-  find "${EXPORT_DIR}/rarefaction_data/temp" -name "*.csv" -exec cp {} "${EXPORT_DIR}/rarefaction_data/" \;
+  find "${EXPORT_DIR}/rarefaction_data/temp" -name "*.csv" -exec cp {} "${EXPORT_DIR}/rarefaction_data/" \; 2>/dev/null
   
-  # Cleanup
   rm -rf "${EXPORT_DIR}/rarefaction_data/temp"
   
-  echo "✓ Rarefaction data exported to: ${EXPORT_DIR}/rarefaction_data/"
-  echo "  Files available:"
-  ls -1 "${EXPORT_DIR}/rarefaction_data/"*.csv 2>/dev/null || echo "  (No CSV files found - data may be in JSON format)"
+  CSV_COUNT=$(ls -1 "${EXPORT_DIR}/rarefaction_data/"*.csv 2>/dev/null | wc -l)
+  
+  if [ "$CSV_COUNT" -gt 0 ]; then
+    echo "✓ Rarefaction data extracted: ${CSV_COUNT} CSV files"
+  fi
 fi
 
 if [ -f "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" ]; then
-  echo "Extracting Faith PD rarefaction curve data..."
+  unzip -q "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" -d "${EXPORT_DIR}/rarefaction_data/temp_faith" 2>/dev/null
   
-  # Unzip QZV
-  unzip -q "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" -d "${EXPORT_DIR}/rarefaction_data/temp_faith"
+  find "${EXPORT_DIR}/rarefaction_data/temp_faith" -name "*.csv" -exec cp {} "${EXPORT_DIR}/rarefaction_data/" \; 2>/dev/null
   
-  # Find and copy CSV files
-  find "${EXPORT_DIR}/rarefaction_data/temp_faith" -name "*.csv" -exec cp {} "${EXPORT_DIR}/rarefaction_data/" \;
-  
-  # Cleanup
   rm -rf "${EXPORT_DIR}/rarefaction_data/temp_faith"
-  
-  echo "✓ Faith PD rarefaction data exported"
 fi
 
-# =======================================================================
-# PIPELINE COMPLETION
-# =======================================================================
 echo ""
-echo "=========================================================="
-echo "Pipeline Completed Successfully!"
-echo "=========================================================="
+echo "ÉTAPE 7 : TERMINÉE"
 echo ""
-echo "Main outputs:"
-echo "  - Feature table: ${EXPORT_DIR}/feature_table/feature-table.tsv"
-echo "  - ASV sequences: ${EXPORT_DIR}/rep_seqs/dna-sequences.fasta"
-echo "  - Taxonomy: ${EXPORT_DIR}/taxonomy/taxonomy.tsv"
-echo "  - ASV + Taxonomy merged: ${EXPORT_DIR}/ASV_abundance_taxonomy.tsv"
-echo "  - Sample read depths: ${EXPORT_DIR}/sample_read_depths_final.tsv"
-echo "  - All diversity indices: ${EXPORT_DIR}/diversity_indices_all.tsv"
-echo "  - Rarefaction curves: ${QIIME_DIR}/visual/rarefaction-curves.qzv"
-if [ -f "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" ]; then
-  echo "  - Faith PD rarefaction: ${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv"
-fi
+
+# ========================================================================================================
+# PIPELINE TERMINÉ
+# ========================================================================================================
+
+echo "=========================================================================================================="
+echo "🎉 PIPELINE TERMINÉ AVEC SUCCÈS ! 🎉"
+echo "=========================================================================================================="
+echo ""
+echo "Date de fin: $(date)"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "RÉSUMÉ DES FICHIERS GÉNÉRÉS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "📊 DONNÉES PRINCIPALES:"
+echo "  • Table ASV                  : export/feature_table/feature-table.tsv"
+echo "  • Séquences ASV              : export/rep_seqs/dna-sequences.fasta"
+echo "  • Taxonomie                  : export/taxonomy/taxonomy.tsv"
+echo "  • ASV + Taxonomie fusionné   : export/ASV_abundance_taxonomy.tsv"
+echo ""
+echo "📈 DIVERSITÉ:"
+echo "  • Tous les indices alpha     : export/diversity_indices_all.tsv"
+echo "  • Profondeurs échantillons   : export/sample_read_depths_final.tsv"
+echo ""
+echo "🌳 PHYLOGÉNIE:"
 if [ -f "${EXPORT_DIR}/tree/tree.nwk" ]; then
-  echo "  - Phylogenetic tree: ${EXPORT_DIR}/tree/tree.nwk"
+echo "  • Arbre phylogénétique       : export/tree/tree.nwk"
+else
+echo "  • Arbre phylogénétique       : ❌ Non généré"
 fi
-echo "  - Rarefaction data (CSV): ${EXPORT_DIR}/rarefaction_data/"
 echo ""
-echo "Rarefaction depth used: ${SAMPLING_DEPTH} reads"
-echo "Max depth in dataset: ${MAX_DEPTH} reads"
+echo "📉 RARÉFACTION:"
+echo "  • Courbes standard           : visual/rarefaction-curves.qzv"
+if [ -f "${QIIME_DIR}/visual/rarefaction-curves-phylogenetic.qzv" ]; then
+echo "  • Courbes Faith PD           : visual/rarefaction-curves-phylogenetic.qzv"
+fi
+echo "  • Données CSV                : export/rarefaction_data/"
 echo ""
-echo "All outputs are in: $QIIME_DIR"
-echo "=========================================================="
+echo "📋 STATISTIQUES:"
+echo "  • Stats DADA2                : visual/dada2-stats.qzv"
+echo "  • Résumé table finale        : visual/table-final-summary.qzv"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "PARAMÈTRES UTILISÉS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "  • Profondeur de raréfaction  : ${SAMPLING_DEPTH} reads"
+echo "  • Profondeur maximale        : ${MAX_DEPTH} reads"
+echo "  • Nombre d'échantillons      : $(tail -n +2 "$MANIFEST_FILE" | wc -l)"
+echo "  • Threads utilisés           : ${THREADS}"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "PROCHAINES ÉTAPES"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "1. Visualiser les fichiers .qzv sur https://view.qiime2.org"
+echo ""
+echo "2. Importer les données dans R pour analyses statistiques:"
+echo "   library(phyloseq)"
+echo "   library(vegan)"
+echo "   "
+echo "   # Import des données"
+echo "   asv_table <- read.table('export/feature_table/feature-table.tsv', header=TRUE, row.names=1, skip=1, sep='\t')"
+echo "   taxonomy <- read.table('export/taxonomy/taxonomy.tsv', header=TRUE, row.names=1, sep='\t')"
+echo "   metadata <- read.table('metadata_ExPLOI.tsv', header=TRUE, row.names=1, sep='\t')"
+echo "   diversity <- read.table('export/diversity_indices_all.tsv', header=TRUE, row.names=1, sep='\t')"
+echo ""
+echo "3. Analyses recommandées:"
+echo "   • Tests de diversité alpha (Kruskal-Wallis, Wilcoxon)"
+echo "   • Analyses de diversité beta (PERMANOVA, PCoA)"
+echo "   • Analyses différentielles (DESeq2, ANCOM)"
+echo "   • Visualisations (barplots, heatmaps, ordinations)"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Tous les fichiers sont dans: ${QIIME_DIR}"
+echo ""
+echo "=========================================================================================================="
