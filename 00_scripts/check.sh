@@ -1,58 +1,47 @@
 #!/bin/bash
 
 # ========================================================================================================
-# DÉTECTION AUTOMATIQUE DE LA LONGUEUR DES READS
+# VÉRIFICATION LONGUEUR READS BRUTS
 # ========================================================================================================
 
-CLEANED_DIR="/nvme/bio/data_fungi/ExPLOI/03_cleaned_data"
+RAW_DATA_DIR="/nvme/bio/data_fungi/ExPLOI/01_raw_data"
 
 echo "=========================================================================================================="
-echo "DÉTECTION DE LA LONGUEUR DES READS"
+echo "VÉRIFICATION : Longueur des reads BRUTS (avant tout traitement)"
 echo "=========================================================================================================="
-echo ""
-
-if [ ! -d "$CLEANED_DIR" ]; then
-    echo "❌ ERROR: Répertoire introuvable: $CLEANED_DIR"
-    exit 1
-fi
-
-echo "Analyse des reads nettoyés (après Trimmomatic)..."
 echo ""
 
 # Prendre le premier fichier R1 et R2
-R1_FILE=$(find "$CLEANED_DIR" -name "*_R1_paired.fastq.gz" | head -1)
-R2_FILE=$(find "$CLEANED_DIR" -name "*_R2_paired.fastq.gz" | head -1)
+R1_FILE=$(find "$RAW_DATA_DIR" -name "*_R1_001.fastq.gz" | head -1)
+R2_FILE=$(find "$RAW_DATA_DIR" -name "*_R2_001.fastq.gz" | head -1)
 
-if [ -z "$R1_FILE" ] || [ -z "$R2_FILE" ]; then
-    echo "❌ ERROR: Aucun fichier paired trouvé dans $CLEANED_DIR"
+if [ -z "$R1_FILE" ]; then
+    echo "❌ ERROR: Aucun fichier trouvé dans $RAW_DATA_DIR"
     exit 1
 fi
 
-echo "Fichiers analysés:"
-echo "  R1: $(basename $R1_FILE)"
-echo "  R2: $(basename $R2_FILE)"
+echo "Fichier analysé: $(basename $R1_FILE)"
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "ANALYSE DE LA LONGUEUR DES READS (1000 premiers reads)"
+echo "LONGUEUR DES READS BRUTS (500 premiers reads)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# Analyser R1
-echo "R1 (Forward):"
-zcat "$R1_FILE" | head -4000 | awk 'NR%4==2 {print length($0)}' | sort -n | uniq -c | tail -20
+echo "R1 (Forward) - Distribution des longueurs:"
+zcat "$R1_FILE" | head -2000 | awk 'NR%4==2 {print length($0)}' | sort -n | uniq -c | tail -10
 
-R1_MIN=$(zcat "$R1_FILE" | head -4000 | awk 'NR%4==2 {print length($0)}' | sort -n | head -1)
-R1_MAX=$(zcat "$R1_FILE" | head -4000 | awk 'NR%4==2 {print length($0)}' | sort -n | tail -1)
-R1_MEDIAN=$(zcat "$R1_FILE" | head -4000 | awk 'NR%4==2 {print length($0)}' | sort -n | awk '{arr[NR]=$1} END {print arr[int(NR/2)]}')
+R1_MIN=$(zcat "$R1_FILE" | head -2000 | awk 'NR%4==2 {print length($0)}' | sort -n | head -1)
+R1_MAX=$(zcat "$R1_FILE" | head -2000 | awk 'NR%4==2 {print length($0)}' | sort -n | tail -1)
+R1_MODE=$(zcat "$R1_FILE" | head -2000 | awk 'NR%4==2 {print length($0)}' | sort -n | uniq -c | sort -rn | head -1 | awk '{print $2}')
 
 echo ""
-echo "R2 (Reverse):"
-zcat "$R2_FILE" | head -4000 | awk 'NR%4==2 {print length($0)}' | sort -n | uniq -c | tail -20
+echo "R2 (Reverse) - Distribution des longueurs:"
+zcat "$R2_FILE" | head -2000 | awk 'NR%4==2 {print length($0)}' | sort -n | uniq -c | tail -10
 
-R2_MIN=$(zcat "$R2_FILE" | head -4000 | awk 'NR%4==2 {print length($0)}' | sort -n | head -1)
-R2_MAX=$(zcat "$R2_FILE" | head -4000 | awk 'NR%4==2 {print length($0)}' | sort -n | tail -1)
-R2_MEDIAN=$(zcat "$R2_FILE" | head -4000 | awk 'NR%4==2 {print length($0)}' | sort -n | awk '{arr[NR]=$1} END {print arr[int(NR/2)]}')
+R2_MIN=$(zcat "$R2_FILE" | head -2000 | awk 'NR%4==2 {print length($0)}' | sort -n | head -1)
+R2_MAX=$(zcat "$R2_FILE" | head -2000 | awk 'NR%4==2 {print length($0)}' | sort -n | tail -1)
+R2_MODE=$(zcat "$R2_FILE" | head -2000 | awk 'NR%4==2 {print length($0)}' | sort -n | uniq -c | sort -rn | head -1 | awk '{print $2}')
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -60,119 +49,123 @@ echo "RÉSUMÉ"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "R1 (Forward):"
-echo "  Min     : ${R1_MIN} bp"
-echo "  Max     : ${R1_MAX} bp"
-echo "  Médiane : ${R1_MEDIAN} bp"
+echo "  Min        : ${R1_MIN} bp"
+echo "  Max        : ${R1_MAX} bp"
+echo "  Mode       : ${R1_MODE} bp (longueur la plus fréquente)"
 echo ""
 echo "R2 (Reverse):"
-echo "  Min     : ${R2_MIN} bp"
-echo "  Max     : ${R2_MAX} bp"
-echo "  Médiane : ${R2_MEDIAN} bp"
+echo "  Min        : ${R2_MIN} bp"
+echo "  Max        : ${R2_MAX} bp"
+echo "  Mode       : ${R2_MODE} bp (longueur la plus fréquente)"
 echo ""
 
-# Calculer paramètres optimaux
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "PARAMÈTRES DADA2 RECOMMANDÉS"
+echo "DIAGNOSTIC"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# Hypothèse : Amplicon V3-V4 = 460bp
-AMPLICON_LENGTH=460
-
-# Calculer troncature pour avoir overlap de 60-80bp
-# Formule: overlap = trunc_f + trunc_r - amplicon
-# On veut overlap = 70bp
-# Donc: trunc_f + trunc_r = amplicon + 70 = 530
-
-# Stratégie : garder au maximum sans dépasser la longueur médiane
-if [ "$R1_MEDIAN" -lt 250 ]; then
-    TRUNC_F=$((R1_MEDIAN - 10))
-else
-    TRUNC_F=240
-fi
-
-if [ "$R2_MEDIAN" -lt 250 ]; then
-    TRUNC_R=$((R2_MEDIAN - 10))
-else
-    TRUNC_R=240
-fi
-
-OVERLAP=$((TRUNC_F + TRUNC_R - AMPLICON_LENGTH))
-
-echo "Hypothèse: Amplicon V3-V4 = ${AMPLICON_LENGTH}bp"
-echo ""
-
-if [ "$R1_MEDIAN" -lt 150 ] || [ "$R2_MEDIAN" -lt 150 ]; then
-    echo "⚠️  ALERTE CRITIQUE: Reads TRÈS COURTS après Trimmomatic!"
+if [ "$R1_MODE" -eq 251 ] || [ "$R1_MODE" -eq 301 ]; then
+    echo "✓ SÉQUENÇAGE STANDARD DÉTECTÉ"
     echo ""
-    echo "Vos reads sont < 150bp → IMPOSSIBLE de couvrir un amplicon de 460bp"
-    echo ""
-    echo "CAUSES POSSIBLES:"
-    echo "  1. Trimmomatic trop agressif (MINLEN trop élevé?)"
-    echo "  2. Données de mauvaise qualité"
-    echo "  3. Mauvais primers utilisés"
-    echo ""
-    echo "SOLUTION:"
-    echo "  → Refaire Trimmomatic avec MINLEN:50 au lieu de MINLEN:100"
-    echo "  → Contacter la société de séquençage"
-    echo ""
-elif [ "$R1_MEDIAN" -lt 250 ] || [ "$R2_MEDIAN" -lt 250 ]; then
-    echo "⚠️  ATTENTION: Reads courts après Trimmomatic"
-    echo ""
-    echo "Vos reads médians:"
-    echo "  R1: ${R1_MEDIAN}bp"
-    echo "  R2: ${R2_MEDIAN}bp"
-    echo ""
-    echo "Paramètres DADA2 recommandés:"
-    echo "  --p-trunc-len-f $((R1_MEDIAN - 20))"
-    echo "  --p-trunc-len-r $((R2_MEDIAN - 20))"
-    echo ""
-    if [ "$OVERLAP" -lt 40 ]; then
-        echo "⚠️  Overlap calculé: ${OVERLAP}bp (TRÈS FAIBLE!)"
+    if [ "$R1_MODE" -eq 251 ]; then
+        echo "  Plateforme: Illumina MiSeq 2x250bp"
         echo ""
-        echo "PROBLÈME:"
-        echo "  → Overlap insuffisant pour merger correctement"
-        echo "  → Vous allez perdre beaucoup de reads"
+        echo "  ⚠️  PROBLÈME CRITIQUE:"
+        echo "  → Amplicon V3-V4 = 460bp"
+        echo "  → Reads 2x250bp = 500bp total"
+        echo "  → Overlap théorique: 250 + 250 - 460 = 40bp"
         echo ""
-        echo "SOLUTIONS:"
-        echo "  1. Refaire Trimmomatic avec MINLEN plus bas"
-        echo "  2. Utiliser --p-trunc-len 0 et accepter le faible taux de merge"
-        echo "  3. Vérifier que les bons primers ont été utilisés"
+        echo "  PARAMÈTRES DADA2 RECOMMANDÉS:"
+        echo "    --p-trim-left-f 17"
+        echo "    --p-trim-left-r 21"
+        echo "    --p-trunc-len-f 0  (garder tout)"
+        echo "    --p-trunc-len-r 0  (garder tout)"
+        echo "    --p-min-overlap 12"
+        echo ""
+        echo "  → Après trim: (250-17) + (250-21) - 460 = 2bp overlap"
+        echo "  → TRÈS LIMITE ! Taux de merge attendu: 40-60%"
+        echo ""
+    else
+        echo "  Plateforme: Illumina MiSeq 2x300bp"
+        echo ""
+        echo "  ✓ PARFAIT pour amplicon V3-V4"
+        echo "  → Overlap théorique: 300 + 300 - 460 = 140bp"
+        echo ""
+        echo "  PARAMÈTRES DADA2 RECOMMANDÉS:"
+        echo "    --p-trim-left-f 17"
+        echo "    --p-trim-left-r 21"
+        echo "    --p-trunc-len-f 0"
+        echo "    --p-trunc-len-r 0"
         echo ""
     fi
 else
-    echo "✓ Reads de longueur acceptable"
+    echo "⚠️  LONGUEUR INHABITUELLE DÉTECTÉE: ${R1_MODE}bp"
     echo ""
-    echo "Paramètres DADA2 OPTIMAUX:"
-    echo ""
-    echo "  qiime dada2 denoise-paired \\"
-    echo "    --p-trunc-len-f $TRUNC_F \\"
-    echo "    --p-trunc-len-r $TRUNC_R \\"
-    echo "    --p-max-ee-f 3 \\"
-    echo "    --p-max-ee-r 3 \\"
-    echo "    --p-trunc-q 2 \\"
-    echo "    --p-min-overlap 12"
-    echo ""
-    echo "  → Overlap théorique: ${OVERLAP}bp"
-    echo ""
+    
+    if [ "$R1_MODE" -lt 200 ]; then
+        echo "  ❌ ALERTE: Reads TRÈS COURTS (< 200bp)"
+        echo ""
+        echo "  CAUSES POSSIBLES:"
+        echo "    1. Mauvaise région amplifiée"
+        echo "    2. Problème lors du séquençage"
+        echo "    3. Mauvais fichiers fournis"
+        echo ""
+        echo "  IMPOSSIBLE de couvrir un amplicon V3-V4 de 460bp avec 2x${R1_MODE}bp"
+        echo ""
+        echo "  ACTIONS:"
+        echo "    → Contacter URGENCE la société de séquençage"
+        echo "    → Vérifier que ce sont les bons fichiers"
+        echo "    → Demander quelle région 16S a été séquencée"
+        echo ""
+    else
+        echo "  PARAMÈTRES DADA2 À TESTER:"
+        echo "    --p-trim-left-f 17"
+        echo "    --p-trim-left-r 21"
+        echo "    --p-trunc-len-f $((R1_MODE - 20))"
+        echo "    --p-trunc-len-r $((R2_MODE - 20))"
+        echo "    --p-min-overlap 12"
+        echo ""
+        
+        OVERLAP=$((R1_MODE - 17 + R2_MODE - 21 - 460))
+        echo "  → Overlap estimé: ${OVERLAP}bp"
+        
+        if [ "$OVERLAP" -lt 20 ]; then
+            echo "  → ⚠️  TRÈS FAIBLE! Beaucoup de pertes attendues"
+        fi
+    fi
 fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "DIAGNOSTIC TERMINÉ"
+echo "PROCHAINES ÉTAPES"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "PROCHAINES ACTIONS:"
-echo ""
-echo "1. Si reads < 250bp:"
-echo "   → Refaire Trimmomatic avec MINLEN:50"
-echo "   → Ou utiliser les données BRUTES (pas Trimmomatic)"
-echo ""
-echo "2. Si reads 250-300bp:"
-echo "   → Relancer DADA2 avec les paramètres ci-dessus"
-echo ""
-echo "3. Si toujours problème:"
-echo "   → Envoyer les screenshots de demux.qzv"
-echo "   → Vérifier avec la société de séquençage"
-echo ""
+
+if [ "$R1_MODE" -lt 200 ]; then
+    echo "❌ STOP - Reads trop courts"
+    echo "   → Contacter la société de séquençage"
+    echo ""
+elif [ "$R1_MODE" -eq 251 ]; then
+    echo "1. Relancer DADA2 avec --p-trunc-len 0 (garder longueur maximale)"
+    echo "2. Accepter un taux de merge faible (40-70%)"
+    echo "3. Espérer ~500-2000 ASVs au lieu de 4700"
+    echo ""
+    echo "OU"
+    echo ""
+    echo "→ Demander à la société comment ils ont obtenu 4700 ASVs"
+    echo "  (Peut-être ont-ils utilisé une méthode différente?)"
+    echo ""
+elif [ "$R1_MODE" -eq 301 ]; then
+    echo "✓ Longueur OK pour V3-V4"
+    echo ""
+    echo "1. Relancer DADA2 avec:"
+    echo "     --p-trim-left-f 17"
+    echo "     --p-trim-left-r 21"
+    echo "     --p-trunc-len-f 0"
+    echo "     --p-trunc-len-r 0"
+    echo ""
+    echo "2. Devrait donner 3000-4500 ASVs"
+    echo ""
+fi
+
 echo "=========================================================================================================="
